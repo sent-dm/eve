@@ -46,6 +46,7 @@ describe("startLocalSubagent", () => {
       initiatorAuth: null,
       parent: {
         continuationToken: "parent-token",
+        originAudience: "private",
         lineage: {
           callId: "call-1",
           rootSessionId: "parent-session",

@@ -19,6 +19,7 @@ import { sessionCommandHookToken } from "#execution/session-command-token.js";
 import type { AgentInput } from "#tools/workflow-definition.js";
 import type { ToolContext } from "#tools/definition.js";
 import type { TaskInboundUpdate } from "#tasks/types.js";
+import { withAgentInvocationParent } from "#tracing/agent-invocation-request.js";
 
 export type InternalAgentInput = {
   readonly agentId?: string;
@@ -62,16 +63,18 @@ const AGENT_INVOCATION_IDS = Symbol.for("eve.workflow-tool-run.agent-invocation-
 export async function agent(ctx: ToolContext, input: AgentInput): Promise<JsonValue> {
   validateAgentInput(input, true);
   readWorkflowToolRunRef(ctx);
-  return await invokeAgent(
-    ctx,
-    {
-      agentId: input.agentId,
-      message: input.message,
-      outputSchema: input.outputSchema,
-      target: input.target,
-    },
-    { invocationId: `${ctx.callId}:${input.key}` },
-  );
+  const invocation: {
+    agentId?: string;
+    message: string;
+    outputSchema?: JsonObject;
+    target: string;
+  } = {
+    message: input.message,
+    target: input.target,
+  };
+  if (input.agentId !== undefined) invocation.agentId = input.agentId;
+  if (input.outputSchema !== undefined) invocation.outputSchema = input.outputSchema;
+  return await invokeAgent(ctx, invocation, { invocationId: `${ctx.callId}:${input.key}` });
 }
 
 /** Invokes an agent with a framework-selected replay-stable invocation id. */
@@ -105,7 +108,10 @@ export async function invokeAgent(
       kind: "request",
       from: run,
       replyTo: replies.token,
-      request: { input, invocationId: options.invocationId, kind: "agent-invoke" },
+      request: withAgentInvocationParent(
+        { input, invocationId: options.invocationId, kind: "agent-invoke" as const },
+        ctx.callId,
+      ),
     });
 
     const iterator = replies[Symbol.asyncIterator]();
