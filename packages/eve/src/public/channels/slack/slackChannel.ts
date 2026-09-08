@@ -209,6 +209,8 @@ export interface SlackChannelState {
   threadTs: string | null;
   /** Slack team id, when the inbound event carried one. */
   teamId: string | null;
+  /** Slack message ts that triggered the active turn. */
+  triggeringMessageTs?: string | null;
   /** Slack workspace whose app installation supplies this session's credentials. */
   installationTeamId?: string | null;
   /**
@@ -928,6 +930,7 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
       teamId: null as string | null,
       installationTeamId: null as string | null,
       triggeringUserId: null,
+      triggeringMessageTs: null,
       pendingToolCallMessage: null,
       lastReasoningTypingAtMs: null,
       lastReasoningTypingStatus: null,
@@ -1341,6 +1344,7 @@ async function dispatchSlackMessage(input: {
     installationTeamId: input.installationTeamId ?? null,
     teamId: input.message.teamId ?? null,
     threadTs: input.message.threadTs,
+    triggeringMessageTs: input.message.ts,
     triggeringUserId: author?.userId ?? null,
   };
   const sessionOperations = bindSlackSessionOperations({

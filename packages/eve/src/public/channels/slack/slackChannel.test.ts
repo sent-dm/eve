@@ -1620,6 +1620,7 @@ describe("slackChannel() inbound mention pipeline", () => {
         installationTeamId: null,
         teamId: "T01",
         threadTs: "1700000000.000300",
+        triggeringMessageTs: "1700000000.000005",
         triggeringUserId: "U01",
       },
     });

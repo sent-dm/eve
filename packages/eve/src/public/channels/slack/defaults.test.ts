@@ -113,6 +113,7 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
 
   it("links a routed DM approval to its thread status and updates it after settlement", async () => {
     const { channel, post, postDirectMessage, request } = buildChannelStub({
+      triggeringMessageTs: "111.333",
       triggeringUserId: "U_REVIEWER",
     });
 
@@ -127,7 +128,7 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     expect(postDirectMessage.mock.calls.every(([userId]) => userId === "U_REVIEWER")).toBe(true);
     expect(postDirectMessage.mock.calls[0]).toEqual([
       "U_REVIEWER",
-      "https://slack.com/archives/C123/pts1?thread_ts=111.222&cid=C123",
+      "https://slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
     ]);
     expect(JSON.stringify(postDirectMessage.mock.calls[1])).toContain("private draft");
     expect(JSON.stringify(postDirectMessage.mock.calls[2])).toContain(

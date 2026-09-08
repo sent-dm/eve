@@ -240,12 +240,12 @@ export function defaultInputRequestedHandler(
         });
         continue;
       }
-      const status = await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
+      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
       await postPrivateToolApproval({
         channel,
+        previewMessageTs: channel.state.triggeringMessageTs ?? channel.slack.threadTs,
         request,
         reviewer,
-        statusMessageTs: status.id,
       });
     }
   };
@@ -266,9 +266,9 @@ async function postPublicInputRequests(
 
 async function postPrivateToolApproval(input: {
   readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
+  readonly previewMessageTs: string;
   readonly request: InputRequest;
   readonly reviewer: string;
-  readonly statusMessageTs: string;
 }): Promise<void> {
   const parts = renderInputRequestPostParts(input.request);
   const route = {
@@ -276,7 +276,7 @@ async function postPrivateToolApproval(input: {
     threadTs: input.channel.slack.threadTs,
   };
   const post = input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
-  const threadUrl = slackThreadUrl({ ...route, messageTs: input.statusMessageTs });
+  const threadUrl = slackThreadUrl({ ...route, messageTs: input.previewMessageTs });
   if (threadUrl !== undefined) {
     // A standalone Slack message permalink renders as Slack's native forwarded-message preview.
     await post(threadUrl);
