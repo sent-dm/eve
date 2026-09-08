@@ -31,7 +31,6 @@ import {
   SessionDynamicSubagentSelectionsKey,
   StepDynamicToolMetadataKey,
   TurnTaskDeliveryKey,
-  TurnTaskStateKey,
 } from "#context/keys.js";
 import { SCHEDULE_APP_AUTH } from "#channel/schedule-auth.js";
 import { invocationOwnerKey } from "#internal/invocation/metadata.js";
@@ -71,7 +70,7 @@ import {
 import { getPendingCoordinationBatch } from "#harness/coordination.js";
 import { AGENT_HANDLES_STATE_KEY } from "#subagents/handles/store.js";
 import { BackgroundToolExecutorKey } from "#harness/background-tools.js";
-import { PendingSkillAnnouncementKey } from "#context/dynamic-skill-lifecycle.js";
+import { updateDynamicSkillAnnouncement } from "#context/dynamic-skill-lifecycle.js";
 import { stashToolInterrupt } from "#harness/tool-interrupts.js";
 import { appendMissingToolResultMessages, createToolLoopHarness } from "#harness/tool-loop.js";
 import { isSessionLimitDecline, TurnCancelledError } from "#harness/turn-cancellation.js";
@@ -98,6 +97,7 @@ import {
   TASK_DELIVERY_INITIATING_INSTRUCTION,
   TASK_DELIVERY_PENDING_INSTRUCTION,
   TASK_DELIVERY_SETTLED_INSTRUCTION,
+  updateTaskStateAnnouncement,
 } from "#tasks/delivery-context.js";
 
 vi.mock("ai", () => ({
@@ -9576,10 +9576,12 @@ describe("createToolLoopHarness", () => {
 
   it("clears static and dynamic user instructions without rerunning lifecycle events", async () => {
     const { emit, events } = createEventCollector();
+    const onHistoryCleared = vi.fn();
     const resolveModel = vi.fn();
     const runStep = createToolLoopHarness(
       createTestConfig("conversation", emit, {
         clearOnly: true,
+        onHistoryCleared,
         resolveModel,
       }),
     );
@@ -9624,6 +9626,7 @@ describe("createToolLoopHarness", () => {
     });
     expect(resolveModel).not.toHaveBeenCalled();
     expect(compactMessages).not.toHaveBeenCalled();
+    expect(onHistoryCleared).toHaveBeenCalledOnce();
     expect(ToolLoopAgent).not.toHaveBeenCalled();
   });
 
@@ -12290,7 +12293,7 @@ describe("createToolLoopHarness", () => {
           toolResults: [{ ...toolResult, input: toolCall.input }],
         });
         const ctx = new ContextContainer();
-        ctx.set(TurnTaskStateKey, "Task status: analysis in progress");
+        updateTaskStateAnnouncement(ctx, "Task status: analysis in progress");
         const runStep = createToolLoopHarness(
           createTestConfig("conversation", undefined, {
             historyProjector:
@@ -12322,7 +12325,7 @@ describe("createToolLoopHarness", () => {
           role: "user",
           content: "Task status: analysis in progress",
         });
-        ctx.set(TurnTaskStateKey, "Task status: analysis completed");
+        updateTaskStateAnnouncement(ctx, "Task status: analysis completed");
         setupMockAgent(defaultModelResult());
         const restored = JSON.parse(JSON.stringify(first.session)) as HarnessSession;
         await contextStorage.run(ctx, () => runStep(restored));
@@ -12340,13 +12343,13 @@ describe("createToolLoopHarness", () => {
 
     it("skips empty skill announcements without rewriting earlier history", async () => {
       const ctx = new ContextContainer();
-      ctx.set(PendingSkillAnnouncementKey, "Available skills\n- policy: Tenant policy");
+      updateDynamicSkillAnnouncement(ctx, "Available skills\n- policy: Tenant policy");
       const runStep = createToolLoopHarness(createTestConfig("conversation"));
       setupMockAgent(defaultModelResult());
       const first = await contextStorage.run(ctx, () =>
         runStep(createTestSession(), { message: "Check the policy." }),
       );
-      ctx.set(PendingSkillAnnouncementKey, "");
+      updateDynamicSkillAnnouncement(ctx, "");
       setupMockAgent(defaultModelResult());
       const next = await contextStorage.run(ctx, () =>
         runStep(first.session, { message: "Continue." }),
@@ -12459,7 +12462,7 @@ describe("createToolLoopHarness", () => {
       const runStep = createToolLoopHarness(createTestConfig("conversation"));
       const ctx = new ContextContainer();
       ctx.set(TurnTaskDeliveryKey, "initiating");
-      ctx.set(TurnTaskStateKey, '[Task state]\n{"tasks":[]}');
+      updateTaskStateAnnouncement(ctx, '[Task state]\n{"tasks":[]}');
 
       await contextStorage.run(ctx, () =>
         runStep(createTestSession(), { message: "Start the background work." }),
@@ -12479,7 +12482,7 @@ describe("createToolLoopHarness", () => {
       const ctx = new ContextContainer();
       const taskState = '[Task state]\n{"tasks":[]}';
       ctx.set(TurnTaskDeliveryKey, "initiating");
-      ctx.set(TurnTaskStateKey, taskState);
+      updateTaskStateAnnouncement(ctx, taskState);
       const session = setHarnessEmissionState(createTestSession(), {
         sequence: 1,
         sessionStarted: true,
