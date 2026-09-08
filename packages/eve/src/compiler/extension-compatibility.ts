@@ -22,8 +22,8 @@ interface ExtensionCapabilityContract {
 const EXTENSION_CAPABILITY_CONTRACTS = {
   extension: { current: 1, supported: [1], dropped: {} },
   tool: {
-    current: 32,
-    supported: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 28, 29, 30, 31, 32],
+    current: 33,
+    supported: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 28, 29, 30, 31, 33],
     dropped: {
       14: "TaskExec.delegated was removed; migrate to workflow-backed background tools",
       15: "TaskExec replaces stageEffect with send",
@@ -39,12 +39,13 @@ const EXTENSION_CAPABILITY_CONTRACTS = {
       25: "TaskExec.delegated was removed; migrate to workflow-backed background tools",
       26: "Background tools now use task yield descriptors",
       27: "TaskExec.delegated was removed; migrate to workflow-backed background tools",
+      32: "The experimental Workflow tool and eve/tools/workflow entrypoint were removed; use experimental.codeMode.",
     },
   },
   dynamicTool: {
-    current: 31,
+    current: 32,
     supported: [
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 28, 29, 30, 31,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 28, 29, 30, 31, 32,
     ],
     dropped: {
       21: "Message and reasoning append events now expose deltas instead of cumulative snapshots.",
@@ -71,12 +72,11 @@ const EXTENSION_CAPABILITY_CONTRACTS = {
   },
   subagent: {
     current: 11,
-    supported: [3, 4, 6, 7, 8, 9, 11],
+    supported: [3, 4, 6, 7, 8, 9, 10, 11],
     dropped: {
       1: "Persistent subagent sessions are now the default and the experimental opt-in was removed",
       2: "Persistent subagent sessions are now the default and the experimental opt-in was removed",
       5: "Message and reasoning append events now expose deltas instead of cumulative snapshots.",
-      10: "Code Mode removes the mode selector; migrate experimental.codeMode to an object containing only maxSubagents, or an empty object.",
     },
   },
   connection: {
