@@ -644,12 +644,13 @@ the batched write and have been corrected here and in the test.
 
 Hosted observations of the same deterministic fixture, each with 99 warm turns:
 
-| Checkpoint                                                                                                 | Warm p50 | Warm p95 | Execute p50 | Finalize p50 | Forwarded owners |
-| ---------------------------------------------------------------------------------------------------------- | -------: | -------: | ----------: | -----------: | ---------------: |
-| [Original holder implementation](https://github.com/vercel/eve/actions/runs/34251207503/job/102145853245)  | 3,326 ms | 4,154 ms |    1,355 ms |     1,173 ms |            90/99 |
-| [Success-abort cleanup](https://github.com/vercel/eve/actions/runs/34255378675/job/102159913084)           | 3,535 ms | 4,717 ms |    1,396 ms |     1,233 ms |            93/99 |
-| [Single snapshot log](https://github.com/vercel/eve/actions/runs/34256959236/job/102165400250)             | 1,593 ms | 2,275 ms |      560 ms |       488 ms |             7/99 |
-| [Direct tails and metadata cache](https://github.com/vercel/eve/actions/runs/34259317275/job/102173528095) | 1,470 ms | 2,265 ms |      452 ms |       373 ms |             4/99 |
+| Checkpoint                                                                                                           | Warm p50 | Warm p95 | Execute p50 | Finalize p50 | Forwarded owners |
+| -------------------------------------------------------------------------------------------------------------------- | -------: | -------: | ----------: | -----------: | ---------------: |
+| [Original holder implementation](https://github.com/vercel/eve/actions/runs/34251207503/job/102145853245)            | 3,326 ms | 4,154 ms |    1,355 ms |     1,173 ms |            90/99 |
+| [Success-abort cleanup](https://github.com/vercel/eve/actions/runs/34255378675/job/102159913084)                     | 3,535 ms | 4,717 ms |    1,396 ms |     1,233 ms |            93/99 |
+| [Single snapshot log](https://github.com/vercel/eve/actions/runs/34256959236/job/102165400250)                       | 1,593 ms | 2,275 ms |      560 ms |       488 ms |             7/99 |
+| [Direct tails and metadata cache](https://github.com/vercel/eve/actions/runs/34259317275/job/102173528095)           | 1,470 ms | 2,265 ms |      452 ms |       373 ms |             4/99 |
+| [Step storage scope and overlapping writes](https://github.com/vercel/eve/actions/runs/34262101510/job/102182828113) | 1,408 ms | 1,871 ms |      401 ms |       348 ms |             2/99 |
 
 The log and metadata-cache checkpoints passed both sequential and concurrent stress scenarios. These
 are separate hosted observations, not interleaved trials. The abort cleanup
@@ -657,6 +658,11 @@ shortened the native completion tail but did not improve client latency. The log
 removed the dominant storage overhead; the subsecond target is still unmet.
 The metadata-cache run still had a 12,213 ms warm outlier and a 15,167 ms concurrent
 follow-up outlier; lower medians do not resolve that tail.
+The scope checkpoint also passed both scenarios; its warm maximum was 9,080 ms.
+The next SDK amendment replays a confirmed hook claim in-process. Six native
+storage/admission tests pass against that amendment, including a claim-order check
+that the owner hook and first execute step share one activation. Its hosted result
+is pending.
 The CI report retains raw client samples and native run/step timings, including
 partial reports when a scenario fails. Event timestamps mark event construction,
 not persistence or client receipt.

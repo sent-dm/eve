@@ -55,3 +55,24 @@ including concurrent access, failed lookups, fresh status, namespaces, durabilit
 promises, and cache isolation. The original upstream writer suite also passed in
 the isolated patch build. Retain or re-evaluate this amendment when upgrading;
 the upstream writer API alone does not include it.
+
+### Local amendment for upstream: replay a durable hook claim in-process
+
+An awaited `hook.getConflict()` previously persisted its successful registration,
+then requeued the workflow solely to observe that registration. The patch instead
+joins pending writes and dispatches, clears the retained VM, reloads the canonical
+event log, and cold-replays through the existing invocation loop. This removes one
+queue handoff and repeated invocation setup from uncontended turn admission.
+
+Hook conflicts still reinvoke. Failed writes reject the delivery. Interleaved hook
+payloads retain their canonical order, and the next step still waits for atomic
+`step_started` ownership before effects. Existing replay budgets and stale-claim
+recovery remain in force; no events are synthesized or accepted optimistically.
+The separate QuickJS entrypoint is unchanged.
+
+The installed SDK regression suite exercises the actual entrypoint, VM, event
+loader, and step executor against a controlled World. It covers registration and
+claim failures, lost acknowledgements, competing activations, concurrent payloads,
+pagination, and budget exhaustion. The original upstream runtime/precondition
+tests also passed in the isolated build (67 tests including the new cases).
+Hosted timing is measured separately; local tests establish scheduling and safety.
