@@ -101,6 +101,14 @@ interface SlackHitlAction {
 interface DerivedHitlResponse {
   readonly kind?: "tool-approval";
   readonly response: ValidatedInputResponse;
+  readonly route?: SlackHitlRoute;
+}
+
+interface DecodedHitlActionId {
+  readonly button: boolean;
+  readonly kind?: "tool-approval";
+  readonly requestId: string;
+  readonly route?: SlackHitlRoute;
 }
 
 /**
@@ -111,35 +119,15 @@ interface DerivedHitlResponse {
 export function deriveHitlResponse(action: SlackHitlAction): DerivedHitlResponse | null {
   if (!action.actionId.startsWith(HITL_ACTION_PREFIX)) return null;
 
-  const actionId = unwrapRoutedHitlActionId(action.actionId).actionId;
-  const encodedRequest = actionId.slice(HITL_ACTION_PREFIX.length);
-
-  if (action.selectedOptionValue !== undefined) {
-    const { kind, requestId } = splitEncodedRequest(encodedRequest);
-    if (!requestId) return null;
-    return kind === "tool-approval"
-      ? {
-          kind,
-          response: parseInputResponse({ optionId: action.selectedOptionValue, requestId }),
-        }
-      : {
-          response: parseInputResponse({ optionId: action.selectedOptionValue, requestId }),
-        };
-  }
-
-  if (action.value !== undefined) {
-    const match = BUTTON_ACTION_ID_RE.exec(encodedRequest);
-    const requestId = match?.groups?.requestId;
-    if (!requestId) return null;
-    return match.groups?.kind === "tool-approval"
-      ? {
-          kind: "tool-approval",
-          response: parseInputResponse({ optionId: action.value, requestId }),
-        }
-      : { response: parseInputResponse({ optionId: action.value, requestId }) };
-  }
-
-  return null;
+  const decoded = decodeHitlActionId(action.actionId);
+  if (decoded === null) return null;
+  const optionId = action.selectedOptionValue ?? action.value;
+  if (optionId === undefined || (action.value !== undefined && !decoded.button)) return null;
+  return {
+    ...(decoded.kind === undefined ? {} : { kind: decoded.kind }),
+    response: parseInputResponse({ optionId, requestId: decoded.requestId }),
+    ...(decoded.route === undefined ? {} : { route: decoded.route }),
+  };
 }
 
 function splitEncodedRequest(value: string): {
@@ -161,60 +149,36 @@ export function isHitlAction(actionId: string): boolean {
   return actionId.startsWith(HITL_ACTION_PREFIX);
 }
 
-/** Reads an original session route embedded in a privately delivered HITL card. */
-export function hitlRouteFromActionId(actionId: string): SlackHitlRoute | undefined {
-  return unwrapRoutedHitlActionId(actionId).route;
-}
-
-/** Embeds the original session route into every interactive action in a Block Kit tree. */
-export function routeHitlBlocks(
-  blocks: readonly unknown[],
-  route: SlackHitlRoute,
-): readonly unknown[] {
-  return rewriteActionIds(blocks, (actionId) =>
-    actionId.startsWith(HITL_ACTION_PREFIX)
-      ? `${HITL_ROUTE_PREFIX}${route.channelId}:${route.threadTs}:${actionId.slice(HITL_ACTION_PREFIX.length)}`
-      : actionId,
-  );
-}
-
-function unwrapRoutedHitlActionId(actionId: string): {
-  readonly actionId: string;
-  readonly route?: SlackHitlRoute;
-} {
-  if (!actionId.startsWith(HITL_ROUTE_PREFIX)) return { actionId };
-  const encoded = actionId.slice(HITL_ROUTE_PREFIX.length);
-  const first = encoded.indexOf(":");
-  const second = encoded.indexOf(":", first + 1);
-  if (first <= 0 || second <= first + 1) return { actionId };
+/** Decodes the framework-owned identity and optional return route from one action id. */
+export function decodeHitlActionId(actionId: string): DecodedHitlActionId | null {
+  if (!actionId.startsWith(HITL_ACTION_PREFIX)) return null;
+  let encoded = actionId.slice(HITL_ACTION_PREFIX.length);
+  let route: SlackHitlRoute | undefined;
+  if (encoded.startsWith("route:")) {
+    encoded = encoded.slice("route:".length);
+    const first = encoded.indexOf(":");
+    const second = encoded.indexOf(":", first + 1);
+    if (first <= 0 || second <= first + 1) return null;
+    route = { channelId: encoded.slice(0, first), threadTs: encoded.slice(first + 1, second) };
+    encoded = encoded.slice(second + 1);
+  }
+  const button = BUTTON_ACTION_ID_RE.exec(encoded);
+  const request = splitEncodedRequest(button?.groups?.requestId ?? encoded);
+  if (!request.requestId) return null;
+  const kind = button?.groups?.kind === "tool-approval" ? "tool-approval" : request.kind;
   return {
-    actionId: `${HITL_ACTION_PREFIX}${encoded.slice(second + 1)}`,
-    route: {
-      channelId: encoded.slice(0, first),
-      threadTs: encoded.slice(first + 1, second),
-    },
+    button: button !== null,
+    ...(kind === undefined ? {} : { kind }),
+    requestId: request.requestId,
+    ...(route === undefined ? {} : { route }),
   };
 }
 
-function rewriteActionIds(
-  value: readonly unknown[],
-  rewrite: (actionId: string) => string,
-): readonly unknown[] {
-  return value.map((entry) => {
-    if (Array.isArray(entry)) return rewriteActionIds(entry, rewrite);
-    if (typeof entry !== "object" || entry === null) return entry;
-    const record = entry as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.entries(record).map(([key, child]) => [
-        key,
-        key === "action_id" && typeof child === "string"
-          ? rewrite(child)
-          : Array.isArray(child)
-            ? rewriteActionIds(child, rewrite)
-            : child,
-      ]),
-    );
-  });
+function encodeHitlActionId(request: InputRequest, route?: SlackHitlRoute): string {
+  const requestIdentity = `${request.kind === "tool-approval" ? "tool-approval:" : ""}${request.requestId}`;
+  return route === undefined
+    ? `${HITL_ACTION_PREFIX}${requestIdentity}`
+    : `${HITL_ROUTE_PREFIX}${route.channelId}:${route.threadTs}:${requestIdentity}`;
 }
 
 /**
@@ -235,15 +199,13 @@ function rewriteActionIds(
  *
  * Always emits at least the prompt section.
  */
-export function renderInputRequestBlocks(request: InputRequest): unknown[] {
+export function renderInputRequestBlocks(request: InputRequest, route?: SlackHitlRoute): unknown[] {
   const prompt = {
     text: { text: truncateSectionText(request.prompt), type: "mrkdwn" },
     type: "section",
   };
   const details = renderInputRequestDetailBlocks(request);
-  const actionId = `${HITL_ACTION_PREFIX}${
-    request.kind === "tool-approval" ? "tool-approval:" : ""
-  }${request.requestId}`;
+  const actionId = encodeHitlActionId(request, route);
 
   const options = request.options;
   const acceptsFreeform = request.allowFreeform === true || !options || options.length === 0;
@@ -299,11 +261,14 @@ export interface SlackInputRequestPostPart {
  * originating message in `block_actions`, so putting large tool input beside
  * the buttons makes the callback body grow with model-authored input.
  */
-export function renderInputRequestPostParts(request: InputRequest): {
+export function renderInputRequestPostParts(
+  request: InputRequest,
+  route?: SlackHitlRoute,
+): {
   readonly controls: SlackInputRequestPostPart;
   readonly details?: SlackInputRequestPostPart;
 } {
-  const blocks = renderInputRequestBlocks(request);
+  const blocks = renderInputRequestBlocks(request, route);
   const firstBlock = blocks[0];
   if (!isApprovalRequest(request) || !isBlockType(firstBlock, "card") || blocks.length === 1) {
     return {

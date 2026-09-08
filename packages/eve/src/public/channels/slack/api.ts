@@ -142,10 +142,6 @@ export interface SlackPostedMessage {
  */
 interface SlackPostWithFiles {
   readonly files?: readonly FileUpload[];
-  /** Allow Slack to render previews for links in this message. Defaults to `false`. */
-  readonly unfurlLinks?: boolean;
-  /** Allow Slack to render media from unfurled links. Defaults to `false`. */
-  readonly unfurlMedia?: boolean;
 }
 
 /**
@@ -616,8 +612,8 @@ function buildPostMessageOptions(
     ...createSlackApiOptions(botToken, context),
     channel: channelId,
     threadTs: threadTs || undefined,
-    unfurlLinks: message.unfurlLinks ?? false,
-    unfurlMedia: message.unfurlMedia ?? false,
+    unfurlLinks: false,
+    unfurlMedia: false,
   };
 
   if ("card" in message) {

@@ -12,11 +12,12 @@ import {
 } from "#public/channels/slack/connections.js";
 import {
   buildAnsweredBlocks,
+  decodeHitlActionId,
   renderInputRequestPostParts,
-  routeHitlBlocks,
   type SlackInputRequestPostPart,
 } from "#public/channels/slack/hitl.js";
 import type { SlackMessage } from "#public/channels/slack/inbound.js";
+import { deliverPrivateToolApproval } from "#public/channels/slack/private-approval-delivery.js";
 import {
   SLACK_MAX_BLOCKS_PER_MESSAGE,
   truncateMessageText,
@@ -120,9 +121,6 @@ function formatSemanticErrorReply(input: {
 function blockContainsRequestAction(block: unknown, requestId: string): boolean {
   if (typeof block !== "object" || block === null) return false;
   const candidate = block as { actions?: unknown; elements?: unknown };
-  const requestActionPrefix = `eve_input:${requestId}`;
-  const approvalActionPrefix = `eve_input:tool-approval:${requestId}`;
-  const routedApprovalMarker = `:tool-approval:${requestId}:`;
   return [candidate.actions, candidate.elements].some(
     (entries) =>
       Array.isArray(entries) &&
@@ -130,10 +128,7 @@ function blockContainsRequestAction(block: unknown, requestId: string): boolean 
         if (typeof entry !== "object" || entry === null) return false;
         const actionId = (entry as { action_id?: unknown }).action_id;
         return (
-          typeof actionId === "string" &&
-          (actionId.startsWith(requestActionPrefix) ||
-            actionId.startsWith(approvalActionPrefix) ||
-            (actionId.startsWith("eve_input:route:") && actionId.includes(routedApprovalMarker)))
+          typeof actionId === "string" && decodeHitlActionId(actionId)?.requestId === requestId
         );
       }),
   );
@@ -240,13 +235,13 @@ export function defaultInputRequestedHandler(
         });
         continue;
       }
-      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
-      await postPrivateToolApproval({
+      await deliverPrivateToolApproval({
         channel,
         previewMessageTs: channel.state.triggeringMessageTs ?? channel.slack.threadTs,
         request,
         reviewer,
       });
+      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
     }
   };
 }
@@ -262,52 +257,6 @@ async function postPublicInputRequests(
       messageTs: message.id,
     });
   }
-}
-
-async function postPrivateToolApproval(input: {
-  readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
-  readonly previewMessageTs: string;
-  readonly request: InputRequest;
-  readonly reviewer: string;
-}): Promise<void> {
-  const parts = renderInputRequestPostParts(input.request);
-  const route = {
-    channelId: input.channel.slack.channelId,
-    threadTs: input.channel.slack.threadTs,
-  };
-  const post = input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
-  const threadUrl = await resolveSlackMessagePermalink({
-    channel: input.channel,
-    messageTs: input.previewMessageTs,
-  });
-  if (threadUrl !== undefined) {
-    // A standalone Slack message permalink renders as Slack's native forwarded-message preview.
-    await post({ markdown: threadUrl, unfurlLinks: true });
-  }
-  if (parts.details !== undefined) {
-    await post({ blocks: routeHitlBlocks(parts.details.blocks, route), text: parts.details.text });
-  }
-  const controlBlocks = routeHitlBlocks(parts.controls.blocks, route);
-  const message = await post({ blocks: controlBlocks, text: parts.controls.text });
-  recordApprovalCards(input.channel.state, [input.request], {
-    messageBlocks: controlBlocks,
-    messageChannelId: typeof message.raw.channel === "string" ? message.raw.channel : undefined,
-    messageTs: message.id,
-  });
-}
-
-async function resolveSlackMessagePermalink(input: {
-  readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
-  readonly messageTs: string;
-}): Promise<string | undefined> {
-  if (!input.channel.slack.channelId || !input.messageTs) return undefined;
-  const response = await input.channel.slack.request("chat.getPermalink", {
-    channel: input.channel.slack.channelId,
-    message_ts: input.messageTs,
-  });
-  return response.ok === true && typeof response.permalink === "string"
-    ? response.permalink
-    : undefined;
 }
 
 function recordApprovalCards(

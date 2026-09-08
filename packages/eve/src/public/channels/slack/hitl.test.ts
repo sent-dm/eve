@@ -4,10 +4,10 @@ import type { InputRequest } from "#shared/input.js";
 import {
   buildAnsweredBlocks,
   buildFreeformModalView,
+  decodeHitlActionId,
   deriveHitlResponse,
   formatInputRequestFallbackText,
   freeformRequestIdFromActionId,
-  hitlRouteFromActionId,
   HITL_ACTION_PREFIX,
   HITL_FREEFORM_ACTION_PREFIX,
   HITL_FREEFORM_MODAL_ACTION_ID,
@@ -16,7 +16,6 @@ import {
   isFreeformAction,
   isHitlAction,
   renderInputRequestBlocks,
-  routeHitlBlocks,
 } from "#public/channels/slack/hitl.js";
 import {
   SLACK_CARD_BODY_TEXT_MAX_LENGTH,
@@ -34,32 +33,30 @@ function makeRequest(overrides: Partial<InputRequest>): InputRequest {
 }
 
 describe("private HITL routes", () => {
-  it("embeds a return route without changing response decoding", () => {
-    const blocks = routeHitlBlocks(
-      [
-        {
-          type: "actions",
-          elements: [
-            {
-              action_id: "eve_input:tool-approval:approval_abc123:button:0",
-              type: "button",
-              value: "approve",
-            },
-          ],
-        },
-      ],
+  it("renders and decodes one typed return route", () => {
+    const blocks = renderInputRequestBlocks(
+      makeRequest({
+        kind: "tool-approval",
+        options: [
+          { id: "approve", label: "Approve" },
+          { id: "cancel", label: "Cancel" },
+        ],
+        requestId: "approval_abc123",
+      }),
       { channelId: "C123", threadTs: "111.222" },
     );
-    const actionId = (blocks[0] as { elements: Array<{ action_id: string }> }).elements[0]!
-      .action_id;
+    const actionId = (blocks[0] as { actions: Array<{ action_id: string }> }).actions[0]!.action_id;
 
-    expect(hitlRouteFromActionId(actionId)).toEqual({
-      channelId: "C123",
-      threadTs: "111.222",
-    });
-    expect(deriveHitlResponse({ actionId, value: "approve" })?.response).toMatchObject({
-      optionId: "approve",
+    expect(decodeHitlActionId(actionId)).toEqual({
+      button: true,
+      kind: "tool-approval",
       requestId: "approval_abc123",
+      route: { channelId: "C123", threadTs: "111.222" },
+    });
+    expect(deriveHitlResponse({ actionId, value: "approve" })).toMatchObject({
+      kind: "tool-approval",
+      response: { optionId: "approve", requestId: "approval_abc123" },
+      route: { channelId: "C123", threadTs: "111.222" },
     });
   });
 });

@@ -47,14 +47,21 @@ function buildChannelStub(state: Partial<SlackChannelState> = {}) {
     .mockResolvedValue({ id: "dm1", raw: { channel: "D123", ok: true } });
   const post = vi.fn().mockResolvedValue({ id: "ts1", raw: { ok: true } });
   const startTyping = vi.fn().mockResolvedValue(undefined);
-  const request = vi.fn(async (operation: string, _body: unknown) =>
-    operation === "chat.getPermalink"
-      ? {
-          ok: true,
-          permalink: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
-        }
-      : { ok: true },
-  );
+  let postedMessages = 0;
+  const request = vi.fn(async (operation: string, _body: unknown) => {
+    if (operation === "conversations.open") return { channel: { id: "D123" }, ok: true };
+    if (operation === "chat.getPermalink") {
+      return {
+        ok: true,
+        permalink: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
+      };
+    }
+    if (operation === "chat.postMessage") {
+      postedMessages += 1;
+      return { ok: true, ts: `dm${postedMessages}` };
+    }
+    return { ok: true };
+  });
   const channel = {
     thread: { postDirectMessage, postEphemeral, post, startTyping } as Partial<
       SlackEventContext["thread"]
@@ -118,7 +125,41 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     expect(postEphemeral).not.toHaveBeenCalled();
   });
 
-  it("links a routed DM approval to its thread status and updates it after settlement", async () => {
+  it("rolls back partial DM delivery without announcing an unusable approval", async () => {
+    const { channel, post, request } = buildChannelStub({
+      triggeringMessageTs: "111.333",
+      triggeringUserId: "U_REVIEWER",
+    });
+    let postedMessages = 0;
+    request.mockImplementation(async (operation: string) => {
+      if (operation === "conversations.open") return { channel: { id: "D123" }, ok: true };
+      if (operation === "chat.getPermalink") {
+        return { ok: true, permalink: "https://example.slack.com/archives/C123/p111333" };
+      }
+      if (operation === "chat.postMessage") {
+        postedMessages += 1;
+        return postedMessages < 3
+          ? { ok: true, ts: `dm${postedMessages}` }
+          : { error: "message_failed", ok: false };
+      }
+      return { ok: true };
+    });
+
+    await expect(
+      defaultInputRequestedHandler(() => "direct-message")(
+        { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
+        channel,
+        sessionCtx,
+      ),
+    ).rejects.toThrow("Slack chat.postMessage failed: message_failed");
+
+    expect(post).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledWith("chat.delete", { channel: "D123", ts: "dm1" });
+    expect(request).toHaveBeenCalledWith("chat.delete", { channel: "D123", ts: "dm2" });
+    expect(channel.state.pendingApprovalCards).toBeUndefined();
+  });
+
+  it("previews the triggering message and updates the routed DM card after settlement", async () => {
     const { channel, post, postDirectMessage, request } = buildChannelStub({
       triggeringMessageTs: "111.333",
       triggeringUserId: "U_REVIEWER",
@@ -131,17 +172,21 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     );
 
     expect(post).toHaveBeenCalledWith("Waiting on approval from <@U_REVIEWER>…");
-    expect(postDirectMessage).toHaveBeenCalledTimes(3);
-    expect(postDirectMessage.mock.calls.every(([userId]) => userId === "U_REVIEWER")).toBe(true);
-    expect(postDirectMessage.mock.calls[0]).toEqual([
-      "U_REVIEWER",
-      {
-        markdown: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
-        unfurlLinks: true,
-      },
-    ]);
-    expect(JSON.stringify(postDirectMessage.mock.calls[1])).toContain("private draft");
-    expect(JSON.stringify(postDirectMessage.mock.calls[2])).toContain(
+    expect(postDirectMessage).not.toHaveBeenCalled();
+    expect(
+      request.mock.calls.filter(([operation]) => operation === "conversations.open"),
+    ).toHaveLength(1);
+    const directMessages = request.mock.calls.filter(
+      ([operation]) => operation === "chat.postMessage",
+    );
+    expect(directMessages).toHaveLength(3);
+    expect(directMessages[0]?.[1]).toMatchObject({
+      channel: "D123",
+      markdown_text: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
+      unfurl_links: true,
+    });
+    expect(JSON.stringify(directMessages[1]?.[1])).toContain("private draft");
+    expect(JSON.stringify(directMessages[2]?.[1])).toContain(
       "eve_input:route:C123:111.222:tool-approval:approval-1",
     );
     expect(request).toHaveBeenCalledWith("chat.getPermalink", {
@@ -165,7 +210,7 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
 
     expect(request).toHaveBeenCalledWith(
       "chat.update",
-      expect.objectContaining({ channel: "D123", text: "Answered: Approve", ts: "dm1" }),
+      expect.objectContaining({ channel: "D123", text: "Answered: Approve", ts: "dm3" }),
     );
     const update = request.mock.calls.find(([method]) => method === "chat.update")?.[1] as {
       blocks?: unknown[];

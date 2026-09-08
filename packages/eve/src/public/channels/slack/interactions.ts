@@ -25,7 +25,6 @@ import {
   HITL_FREEFORM_MODAL_ACTION_ID,
   HITL_FREEFORM_MODAL_BLOCK_ID,
   HITL_FREEFORM_MODAL_CALLBACK_ID,
-  hitlRouteFromActionId,
   isFreeformAction,
   isHitlAction,
   type HitlFreeformModalMetadata,
@@ -307,7 +306,7 @@ export async function handleInteractionPost(
 
   if (hitlActions.length > 0) {
     const user = hitlActions[0]!.action.user;
-    const route = hitlRouteFromActionId(hitlActions[0]!.action.actionId);
+    const route = hitlActions[0]!.derived.route;
     ctx.waitUntil(
       dispatchBlockInputResponses({
         ctx,
