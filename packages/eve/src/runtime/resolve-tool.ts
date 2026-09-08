@@ -115,6 +115,7 @@ type OptionalResolvedFields = {
     | "label"
     | "approval"
     | "approvalKey"
+    | "approvalPrompt"
     | "toModelOutput"]?: ResolvedToolDefinition[K];
 };
 
@@ -154,6 +155,13 @@ function extractOptionalHooks(
       record.approvalKey,
       describe(definition, "to provide an approvalKey function"),
     ) as ResolvedToolDefinition["approvalKey"];
+  }
+
+  if (record.approvalPrompt !== undefined) {
+    optional.approvalPrompt = expectFunction(
+      record.approvalPrompt,
+      describe(definition, "to provide an approvalPrompt function"),
+    ) as ResolvedToolDefinition["approvalPrompt"];
   }
 
   if (record.toModelOutput !== undefined) {
