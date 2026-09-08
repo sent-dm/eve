@@ -439,7 +439,7 @@ export default slackChannel({
 
 HITL renders as Slack buttons and selects. Fixed-choice actions and freeform modal submissions pass through `onInputResponse` before the parked session resumes. The initial **Type your answer** action only opens eve's modal; the hook runs when the user submits an answer.
 
-Set `approvalChannel` to choose where each tool approval appears. Return `"direct-message"` when the tool input must be visible only to the Slack user who triggered the turn, or `"thread"` for the normal shared-thread approval. Direct-message approvals start with a forwarded-message preview of the Slack message that triggered the turn, route the response back to the original session, and post `Waiting on approval from @reviewer…` in that thread without exposing the tool input. Add the `im:write` bot scope.
+Set `approvalChannel` to choose where each tool approval appears. Return `"direct-message"` when the tool input must be visible only to the Slack user who triggered the turn, or `"thread"` for the normal shared-thread approval.
 
 ```ts title="agent/channels/slack.ts"
 import { slackChannel } from "eve/channels/slack";
