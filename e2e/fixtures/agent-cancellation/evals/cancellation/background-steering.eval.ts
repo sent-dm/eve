@@ -94,7 +94,7 @@ export default cases.map(({ parentActive, steering, description }) =>
           ),
         );
 
-        const interruptedParent = parent;
+        const interruptedParent = parentActive ? parent : undefined;
         parent = await parent.session.start(
           steering
             ? "Actually, use STEERED instead of ORIGINAL."
@@ -103,7 +103,9 @@ export default cases.map(({ parentActive, steering, description }) =>
         );
         await t.require(parent.sessionId, equals(sessionId));
 
-        if (parentActive) {
+        if (interruptedParent !== undefined) {
+          // A send is correlated to its new delivery; the previous handle
+          // observes the turn that steering interrupts.
           const cancelled = await interruptedParent.result();
           cancelled.notEvent("turn.failed");
           cancelled.event("turn.cancelled", { count: 1 });
@@ -129,6 +131,7 @@ export default cases.map(({ parentActive, steering, description }) =>
           });
         }
 
+        // The initial dispatch may have arrived after the acknowledgment.
         const calls = [
           called,
           ...parentTurns.flatMap((turn) =>
