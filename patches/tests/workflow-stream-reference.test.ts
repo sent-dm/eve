@@ -191,6 +191,53 @@ describe("resolved stream references", () => {
     }
   });
 
+  it.each(["commit", "failure"])(
+    "keeps contributor durability pending after lock release until transport %s",
+    async (outcome) => {
+      const { world, chunks } = await fixture();
+      const reference = await getRun(RUN).getStreamReference();
+      const gate = Promise.withResolvers<void>();
+      const started = Promise.withResolvers<void>();
+      const failure = new Error("Contribution persistence failed");
+      const persist = world.streams.write.getMockImplementation()!;
+      world.streams.write.mockImplementationOnce(async (...args) => {
+        started.resolve();
+        await gate.promise;
+        if (outcome === "failure") throw failure;
+        await persist(...args);
+      });
+      let finished = false;
+      const writing = write(Run.fromStreamReference(reference), "accepted").then(
+        (value) => {
+          finished = true;
+          return { value };
+        },
+        (error: unknown) => {
+          finished = true;
+          return { error };
+        },
+      );
+      try {
+        await started.promise;
+        expect(finished).toBe(false);
+        expect(chunks.size).toBe(0);
+        gate.resolve();
+        const result = await writing;
+        if (outcome === "failure") {
+          expect(result).toEqual({ error: failure });
+          expect(chunks.size).toBe(0);
+        } else {
+          expect(result).toHaveProperty("value");
+          expect(await read(Run.fromStreamReference(reference))).toBe("accepted");
+        }
+        expect(world.streams.close).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await writing;
+      }
+    },
+  );
+
   it("binds independent namespaces and closes only the addressed stream", async () => {
     const { world, closed } = await fixture({ encrypted: false });
     const owner = getRun(RUN);

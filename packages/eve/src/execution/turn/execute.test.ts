@@ -4,6 +4,7 @@ import {
   retireTaskSubmissions,
 } from "#execution/turn/submissions.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RunExpiredError, WorkflowRunNotFoundError } from "#compiled/@workflow/errors/index.js";
 import { executeTurnStep, projectProgress } from "#execution/turn/execute.js";
 import { setEveAttributes } from "#runtime/attributes/emit.js";
 import {
@@ -185,6 +186,32 @@ describe("turn execution boundary", () => {
     expect(mocks.open).not.toHaveBeenCalled();
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.model).not.toHaveBeenCalled();
+  });
+
+  it.each([new WorkflowRunNotFoundError("holder"), new RunExpiredError("The session expired.")])(
+    "retires a submission to an unavailable owner: $name",
+    async (error) => {
+      mocks.resolveSession.mockRejectedValueOnce(error);
+      await expect(run()).resolves.toEqual({
+        kind: "receipt",
+        receipt: { terminal: true, deliveries: { next: "retired" } },
+      });
+      expect(mocks.open).not.toHaveBeenCalled();
+      expect(mocks.create).not.toHaveBeenCalled();
+      expect(mocks.model).not.toHaveBeenCalled();
+      expect(setEveAttributes).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retires a submission when the snapshot owner no longer exists", async () => {
+    mocks.open.mockRejectedValueOnce(new WorkflowRunNotFoundError("snapshot-owner"));
+    await expect(run()).resolves.toEqual({
+      kind: "receipt",
+      receipt: { terminal: true, deliveries: { next: "retired" } },
+    });
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.model).not.toHaveBeenCalled();
+    expect(mocks.append).not.toHaveBeenCalled();
   });
 
   it("rejects a missing stored seed instead of initializing from candidate input", async () => {

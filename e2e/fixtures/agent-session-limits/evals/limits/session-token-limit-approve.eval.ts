@@ -30,8 +30,10 @@ export default defineEval({
       }
     };
 
-    await deliverWhileActive('Queued message A: preserve the original reply "approved".');
-    await deliverWhileActive('Queued message B: preserve the original reply "approved".');
+    const messageA = 'Queued message A: preserve the original reply "approved".';
+    const messageB = 'Queued message B: preserve the original reply "approved".';
+    await deliverWhileActive(messageA);
+    await deliverWhileActive(messageB);
 
     const prompted = await active.result();
     prompted.event("input.requested", { count: 1 });
@@ -45,27 +47,40 @@ export default defineEval({
     if (activeState === undefined) {
       throw new Error("The active eval session did not expose client state.");
     }
-    // Both messages were queued behind the active turn, so eve delivers them
-    // coalesced into one follow-up turn while the limit prompt stays pending.
-    const queuedSession = t.target.watchTurn(active.sessionId, {
+    let queuedSession = t.target.watchTurn(active.sessionId, {
       startIndex: activeState.streamIndex,
     });
-    const queued = await queuedSession.result();
-    queued.event("message.received", { count: 1 });
-    queued.notEvent("input.requested");
-    queued.eventsSatisfy(
-      "coalesces messages A and B in order while preserving the pending prompt",
-      (events) => {
-        const received = events.find((event) => event.type === "message.received");
-        if (received === undefined) return false;
-        const messageAIndex = received.data.message.indexOf("Queued message A");
-        const messageBIndex = received.data.message.indexOf("Queued message B");
-        return messageAIndex !== -1 && messageBIndex > messageAIndex;
-      },
-    );
+    const queuedA = await queuedSession.result();
+    queuedA.event("message.received", { count: 1, data: { message: messageA } });
+    queuedA.event("turn.started", { count: 1 });
+    queuedA.event("session.waiting", { count: 1 });
+    queuedA.notEvent("input.requested");
+    queuedA.notEvent("step.started");
+    queuedA.notEvent("message.completed");
+
+    // Each queued submission owns its turn. The unanswered limit prompt
+    // defers A, so the second turn carries A followed by B until approval.
+    const queuedState = queuedSession.session.state;
+    if (queuedState === undefined) {
+      throw new Error("The queued eval session did not expose client state.");
+    }
+    queuedSession = t.target.watchTurn(active.sessionId, {
+      startIndex: queuedState.streamIndex,
+    });
+    const queuedB = await queuedSession.result();
+    queuedB.event("message.received", {
+      count: 1,
+      data: { message: `${messageA}\n\n${messageB}` },
+    });
+    queuedB.event("turn.started", { count: 1 });
+    queuedB.event("session.waiting", { count: 1 });
+    queuedB.notEvent("input.requested");
+    queuedB.notEvent("step.started");
+    queuedB.notEvent("message.completed");
     t.check(
-      [...prompted.events, ...queued.events].filter((event) => event.type === "input.requested")
-        .length,
+      [...prompted.events, ...queuedA.events, ...queuedB.events].filter(
+        (event) => event.type === "input.requested",
+      ).length,
       equals(1),
     );
 

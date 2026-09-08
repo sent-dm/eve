@@ -165,6 +165,7 @@ async function executeClaimedTurn(
       work: { kind: "model" },
       abortSignal: controller.signal,
     });
+    if (!("session" in executed)) return executed.result;
     const session = executed.session;
     state.resources = session;
     eventIds.add(session.initialEventId);

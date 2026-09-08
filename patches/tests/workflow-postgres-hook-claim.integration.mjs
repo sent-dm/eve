@@ -23,7 +23,11 @@ if (!connectionString)
   throw new Error("EVE_TEST_POSTGRES_URL must name a disposable test database.");
 const pool = new Pool({ connectionString, max: 12 });
 const db = createClient(pool);
-await migrate(db, { migrationsFolder: join(sdk, "../src/drizzle/migrations") });
+await migrate(db, {
+  migrationsFolder: join(sdk, "../src/drizzle/migrations"),
+  migrationsSchema: "workflow_drizzle",
+  migrationsTable: "workflow_migrations",
+});
 const prefix = `hook-claim-${crypto.randomUUID()}`;
 const runIds = [];
 const queries = [];

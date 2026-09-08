@@ -56,7 +56,7 @@ Provider keys, tool secrets, and MCP, OpenAPI, and connection credentials stay i
 
 ## Resuming after a crash
 
-Crash the process, hit a timeout, or redeploy mid-turn, and the run picks up from the last completed step rather than replaying the whole turn. Completed steps never re-run; eve replays the recorded result. A step interrupted mid-execution re-runs, so make non-idempotent side effects like charges or emails idempotent, or gate them with approval. Whatever that step already wrote to the session stream stays there, and the re-run emits its events again under new ids, so a stream consumer sees both attempts — see [the event envelope](./sessions-runs-and-streaming#the-event-envelope).
+Completed Workflow steps replay their recorded results. A retried turn step also reuses its committed checkpoint without repeating the work. If a turn attempt started effects but failed before committing its resulting checkpoint, eve fails the turn rather than repeating work whose outcome is uncertain. This does not guarantee exactly-once external effects: keep operations such as charges or emails idempotent. Events already written stay on the session stream, and model retries within an executing step can emit additional events — see [the event envelope](./sessions-runs-and-streaming#the-event-envelope).
 
 There's nothing to configure. eve owns the workflow lifecycle, and sessions are durable by default.
 
@@ -68,7 +68,7 @@ Some work has to wait, including a human approving a [tool](../tools) or an inte
 
 ## Message delivery and steering
 
-Channels resolve the session's immutable resource descriptor and start an independent turn workflow with the accepted input. The descriptor holds stream references; conversation history is restored inside the winning turn after it claims execution ownership. The session event stream stays stable across turns and deployments.
+Channels authorize the input, resolve its session address, and start an independent turn workflow. After claiming execution ownership, the winning turn resolves the immutable resource descriptor and restores conversation history inside its execution step. The session event stream stays stable across turns and deployments.
 
 Only one holder can own a channel continuation token. When simultaneous first messages compete for an address, the losing holder forwards its accepted input to the winner. Rekeying claims an additional alias and retains earlier aliases. HTTP-created sessions use their stable session ID and do not need a channel continuation token.
 

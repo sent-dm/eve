@@ -10,6 +10,7 @@ import {
   turnTaskId,
 } from "#execution/turn/submissions.js";
 import { getStepMetadata } from "#compiled/@workflow/core/index.js";
+import { RunExpiredError, WorkflowRunNotFoundError } from "#compiled/@workflow/errors/index.js";
 import type { DeliverHookPayload, HookPayload } from "#channel/types.js";
 import type { InboxAddress } from "#execution/inbox/types.js";
 import { sessionEvents } from "#execution/session/events.js";
@@ -64,10 +65,9 @@ interface ResolvedExecuteTurnInput extends ExecuteTurnInput {
   readonly session: SessionResources;
 }
 
-export interface ExecutedTurn {
-  readonly session: SessionResources;
-  readonly result: TurnExecutionResult;
-}
+export type ExecutedTurn =
+  | { readonly session: SessionResources; readonly result: TurnExecutionResult }
+  | { readonly result: Extract<TurnExecutionResult, { kind: "receipt" }> };
 
 /** The only model boundary: hydrate, do work, commit, and return a small reference. */
 export async function executeTurnStep(input: ExecuteTurnInput): Promise<ExecutedTurn> {
@@ -79,6 +79,14 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<Executed
     session = await resolveSessionTarget(input, storage);
     snapshots = await openCheckpointLog(session.snapshots, storage);
   } catch (error) {
+    if (WorkflowRunNotFoundError.is(error) || RunExpiredError.is(error)) {
+      return {
+        result: {
+          kind: "receipt",
+          receipt: { terminal: true, deliveries: { [input.submission.eventId]: "retired" } },
+        },
+      };
+    }
     throw new SessionStorageUnavailableError(error);
   }
   return { session, result: await executeTurn({ ...input, session }, storage, snapshots) };

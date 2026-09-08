@@ -7,6 +7,7 @@ import {
   confirmDeployWorkflow,
   failingDeployWorkflow,
   reportingDeployWorkflow,
+  stepThenRaceWorkflow,
 } from "#internal/testing/workflow-tool-fixtures.js";
 import { readStartedOwner } from "#execution/inbox/readiness.js";
 import { sendInbox } from "#execution/inbox/send.js";
@@ -63,6 +64,15 @@ describe("unified owner transport", () => {
     expect((await run.returnValue).map((event) => event.kind)).toEqual([
       "tool.report",
       "tool.outcome",
+    ]);
+  });
+
+  it("advances an authored step into a sleep race while its admission watcher remains pending", async () => {
+    const run = await start(ownerInboxTestWorkflow, [
+      { token: "owner-test:step-then-race", toolWorkflowId: workflowId(stepThenRaceWorkflow) },
+    ]);
+    expect((await run.returnValue).map((event) => event.payload)).toMatchObject([
+      { result: { status: "completed", output: { decided: "timed out", service: "api" } } },
     ]);
   });
 

@@ -13,8 +13,9 @@ must stop reconnecting the reader
 and constructing a readable for its tail index must avoid opening the stream
 ([`31dabce`](https://github.com/vercel/workflow/commit/31dabce0c87fa48af210362061324ff0369e094f)).
 
-The patch applies the changes to `src/runtime/run.ts`, `src/runtime.ts`, and
-`src/serialization.ts` onto the pinned package's sources. JavaScript, declarations,
+The patch applies the changes to `src/runtime/run.ts`, `src/runtime.ts`,
+`src/runtime/suspension-handler.ts`, and `src/serialization.ts` onto the pinned
+package's sources. JavaScript, declarations,
 and source maps were regenerated with TypeScript 5.9.3 after verifying that this
 reproduced the original package artifacts byte for byte.
 
@@ -103,6 +104,36 @@ first read, and stock Vercel key routing. Native storage tests verify owner rout
 encrypted contributor writes, and key-resolution counts across cold and resolved
 scopes. This API is a local proposal for upstream review; retain or re-evaluate it
 when upgrading the SDK.
+
+### Local amendment for upstream: resume on individual step completion
+
+The Node scheduler previously waited for all inline bodies before replay, and
+separately dispatched steps also deferred replay until every sibling completed.
+A background step waiting for its parent could therefore block a foreground
+continuation that the parent needed, creating a deadlock.
+
+The patch permits new inline execution only for a lone pending step, before any
+inline claim is committed. Parallel steps use independent queue messages, and
+each terminal result reloads the canonical event log and replays the workflow.
+The workflow's promises determine which siblings must finish. Atomic claims,
+single-flight protection, ownership leases and retry budgets remain unchanged.
+
+The installed regression suite covers progress, races, failures and event order.
+Sequential steps retain their inline fast path; parallel work can use more queue
+invocations and replays. Previously created groups of multiple inline-owned steps
+and the separate QuickJS scheduler are outside this amendment's scope.
+
+### Local amendment for upstream: a 1ms stream group-commit window
+
+The default leading-chunk window is now 1ms. This lets adjacent events share a
+World write instead of sending their first chunk immediately. Explicit environment
+and World overrides retain their precedence, including `0` for immediate dispatch.
+Writer release, close and durability barriers still drain pending chunks and
+propagate write failures.
+
+This trades up to 1ms of isolated-chunk latency for fewer adjacent-event writes.
+Local turn measurements selected 1ms over 5ms and 10ms; hosted timing is measured
+separately. Keep or re-evaluate this default when adopting an upstream release.
 
 ## PostgreSQL hook ownership
 

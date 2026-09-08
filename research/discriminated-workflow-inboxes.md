@@ -108,8 +108,8 @@ storage adapter knows whether an ID encodes a run plus namespace, refers to a
 separate storage object, or needs a lookup. Neither turn code nor the harness
 constructs a stream ID from `sessionId` or substitutes `holderRunId` for it.
 Event cursors belong to their event stream and cannot address snapshots.
-`EventKey` identifies the envelope's `(producer.id, eventId)` pair across retries
-and forwarding; it is independent of the candidate run ID.
+`EventKey` is the submission's stable `eventId`, preserved across retries and
+forwarding independently of the candidate run ID.
 
 The descriptor needs an explicit persistence location. The initial Workflow adapter
 publishes it once in a closed `eve.session.resources` namespace on the holder run.
@@ -224,11 +224,11 @@ The resulting log retains that position while the turn owns the exclusive claim;
 it never lives in workflow history. Its `latest` field returns
 `undefined` for initialized storage with no checkpoint; it must not wait for a
 future append while the caller holds execution ownership. A read failure is not
-an empty session. Only the descriptor's designated `initialEventId` may initialize
-an empty session from its seed. An early follow-up releases its claim before
-waiting and competing again, so it cannot block the initial turn. The latest read
-bypasses caches; a checkpoint with unfinished work still requires reconciliation
-before a new owner performs effects.
+an empty session. Any claiming candidate can initialize from the persisted seed
+identified by the descriptor's `initialEventId`, then admit its own submission
+according to the delivery policy. The initial input precedes follow-ups unless
+an applicable control retires it. The latest read bypasses caches; a checkpoint
+with unfinished work still requires reconciliation before a new owner performs effects.
 
 `append()` returns an immutable record reference after persistence; retries of the
 same write identity must not create a different logical checkpoint. Reusing a write
@@ -700,6 +700,7 @@ Hosted observations of the same deterministic fixture, each with 99 warm turns:
 | [In-process hook replay](https://github.com/vercel/eve/actions/runs/34264197868/job/102189665926)                    | 1,145 ms | 1,867 ms |      369 ms |       351 ms |             4/99 |
 | [Direct candidate admission](https://github.com/vercel/eve/actions/runs/34266537084/job/102197665788)                | 1,082 ms | 1,451 ms |      364 ms |       337 ms |             4/99 |
 | [Background observability](https://github.com/vercel/eve/actions/runs/34268266124/job/102205037091)                  | 1,114 ms | 1,741 ms |      368 ms |       334 ms |             4/99 |
+| [Immutable stream references](https://github.com/vercel/eve/actions/runs/34271267671/job/102213656637)               | 1,035 ms | 1,462 ms |      345 ms |       312 ms |             5/99 |
 
 The log and metadata-cache checkpoints passed both sequential and concurrent stress scenarios. These
 are separate hosted observations, not interleaved trials. The abort cleanup
@@ -722,6 +723,19 @@ show a latency improvement: 1,114 ms warm median, 1,741 ms p95, and 3,183 ms max
 Concurrent second turns measured 1,300 ms median and 4,296 ms p95. Native tests
 separately prove that a blocked attribute transport cannot hold workflow completion;
 removing that dependency is not a claim that those writes dominated this fixture.
+The immutable-reference checkpoint passed both scenarios: 1,035 ms warm median,
+1,462 ms p95, and 4,186 ms maximum. Concurrent second turns measured 1,345 ms median
+and 4,272 ms p95. The ordinary path is closer to the subsecond target, but neither
+its median nor its tail meets that target yet.
+
+The SDK's existing stream group-commit window provides the next measured experiment.
+With the window at 1 ms, native warm turns use eight holder operations: two reads,
+four checkpoint writes, and two event batches. The default 0 ms window used ten
+operations. Windows of 5 ms and 10 ms produced the same count with higher local
+latency. This preserves checkpoint durability and ordered event frames; it sets a
+one-millisecond batching window before stream flushes. Hosted measurement is
+still required before attributing a latency gain.
+
 The CI report retains raw client samples and native run/step timings, including
 partial reports when a scenario fails. Event timestamps mark event construction,
 not persistence or client receipt.
@@ -908,8 +922,9 @@ and disposal under Workflow replay still require Workflow-backed validation.
 `DEFAULT_TURN_POLICY` remains `steer`, now meaning step-boundary steering. Callers
 requiring abort-and-replace choose `interrupt`. Matching cancel wins over interrupt;
 otherwise the first interrupt supplies replacement input and later input stays
-queued. Eligible steers coalesce in recorded inbox order and prevent natural
-completion. Required sleep, task dispatch, authorization, human input, and runtime
+queued. Each queued submission owns a separate subsequent turn in committed
+queue order; queued candidates do not coalesce. Eligible steers coalesce in
+recorded inbox order and prevent natural completion. Required sleep, task dispatch, authorization, human input, and runtime
 results remain obligations. Stale cancels are discarded; stale messages queue;
 responses settle only matching live requests. Clear/compact queue, while reset
 aborts the active scope and applies existing reset semantics.

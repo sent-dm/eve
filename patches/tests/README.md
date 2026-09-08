@@ -23,8 +23,10 @@ EVE_TEST_POSTGRES_URL=postgres://user:password@127.0.0.1:5432/test \
   node --test --test-timeout=30000 patches/tests/workflow-postgres-hook-claim.integration.mjs
 ```
 
-This suite uses the installed PostgreSQL World's storage implementation and real
-migrations. It inserts isolated test runs and removes only its own rows. It
+This suite uses the installed PostgreSQL World's storage implementation, real
+migrations, and the same migration ledger as its `bootstrap` command. It can run
+after bootstrap or initialize an empty test database. It inserts isolated test
+runs and removes only its own rows. It
 verifies concurrent token claims, replay deduplication, event-write rollback,
 creation visibility, disposed-hook replay, orphan recovery, retention expiry,
 and concurrent disposal. It also reports SQL statement counts. PostgreSQL CI runs
@@ -35,3 +37,10 @@ another copy of the package's storage module with its normal dependencies. Set
 `EVE_TEST_POSTGRES_BASELINE=1` only with the unpatched implementation: this holds
 its first two completed token reads so both claims observe the same empty state,
 without changing PostgreSQL's schema or query results.
+
+The parallel-progress suite exercises the actual workflow entrypoint with a pending
+background step and foreground continuations. It covers ordinary, batched and
+resilient dispatch, `Promise.race`, failure handling, durable waits, interleaved hook
+payloads, duplicate-delivery single-flight, failed publication and the sequential
+inline fast path. Only the World transport is controlled; the scheduler, VM,
+event loader, serialization and step execution are the installed implementation.

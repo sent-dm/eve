@@ -142,9 +142,9 @@ Because ids lead with a timestamp, a `primary key (id)` stays roughly append-ord
 - Rewinding with `startIndex=0`, or reading back from the tail with a negative `startIndex`.
 - Restoring a saved event log that overlaps the prefix the live stream replays.
 
-**What it does not cover: a retried step re-emits under new ids.** eve runs each durable step up to four times. If a step is interrupted partway — a crash, a timeout, a model error it retries through — whatever it already wrote stays on the stream, and the new attempt emits its own events with their own ids. Both attempts carry the same `turnId`, `stepIndex`, and `sequence`, because the retry restores that state from the step's input, but they are distinct events and no field records which attempt finished.
+**Retries and uncertain effects.** Completed Workflow steps replay their recorded results without re-running the body. A retried turn step can also reuse its committed checkpoint without repeating model or tool work. If an attempt started effects but failed before committing its resulting checkpoint, eve fails the turn instead of repeating work whose outcome is uncertain. Events already written remain on the stream.
 
-Replaying a _completed_ step is a different thing and emits nothing at all: eve serves the recorded result from its journal without re-running the body. Crash recovery, redeploys, and resuming a parked turn therefore add nothing to the stream. Only an interrupted step re-runs.
+Model retries within an executing step can still emit additional events under new IDs. Those events may share `turnId`, `stepIndex`, and `sequence`; these coordinates do not identify which attempt finished. Deduplicate reconnects by `meta.id`, without treating matching coordinates as duplicate events.
 
 Three more things to know:
 
@@ -182,7 +182,7 @@ A structured response matches any currently pending request by ID, not only the 
 
 One delivery can answer requests from several batches. eve resumes approval-bearing batches in durable order and carries later answers forward until each batch can resume.
 
-Accepted messages retain their durable admission order. Queued input remains attached to the deployment that accepted it. See [message delivery and steering](./execution-model-and-durability#message-delivery-and-steering) for the current runtime contract.
+Accepted messages retain their durable admission order. Each `"queue"` message starts a separate subsequent turn, even when several messages arrive during the same active turn. Eligible `"steer"` messages can coalesce at the same safe boundary. Queued input remains attached to the deployment that accepted it. See [message delivery and steering](./execution-model-and-durability#message-delivery-and-steering) for the current runtime contract.
 
 ## Cancel the in-flight turn
 

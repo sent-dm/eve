@@ -383,14 +383,13 @@ describe("turn cancellation integration", () => {
 
       try {
         const commandToken = sessionCommandToken(run.sessionId);
-        const cancelHook = await requireHookOwner(activeTurnToken(run.sessionId));
-
         await fixture.toolStarted;
+        const cancelHook = await requireHookOwner(activeTurnToken(run.sessionId));
         // A matching turn guard cancels the observed turn (the first
         // turn's id is derived from the owning run).
         await dispatchSessionCommandByToken(commandToken, {
           kind: "cancel",
-          turnId: `turn_${(await requireHookOwner(activeTurnToken(run.sessionId))).runId}`,
+          turnId: `turn_${cancelHook.runId}`,
         });
 
         const cancelledTurn = await stream.nextTurn();

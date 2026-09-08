@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { InboxEnvelope, OwnerInbox } from "#execution/inbox/types.js";
 import { createSessionResources } from "#execution/session/resources.js";
 import type { SnapshotRecordRef } from "#execution/session/resources.js";
+import { executeTurnStep } from "#execution/turn/execute.js";
 import type {
   TurnExecutionResult,
   TurnProgress,
@@ -28,10 +29,7 @@ vi.mock("#compiled/@workflow/core/index.js", () => ({
 vi.mock("#execution/inbox/owner.js", () => ({ createOwnerInbox: mocks.createOwnerInbox }));
 vi.mock("#execution/inbox/send.js", () => ({ sendInboxStep: mocks.sendInboxStep }));
 vi.mock("#execution/turn/execute.js", () => ({
-  executeTurnStep: async (...args: unknown[]) => ({
-    session: resources,
-    result: await mocks.executeTurnStep(...args),
-  }),
+  executeTurnStep: vi.fn(),
 }));
 vi.mock("#execution/turn/finalize.js", () => ({
   finalizeTurnStep: mocks.finalizeTurnStep,
@@ -146,6 +144,10 @@ function submit(
 describe("turn workflow ownership", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(executeTurnStep).mockImplementation(async (...args) => ({
+      session: resources,
+      result: await mocks.executeTurnStep(...args),
+    }));
     mocks.finalizeTurnStep.mockResolvedValue(receipt);
     mocks.failTurnStep.mockResolvedValue({ deliveries: {}, terminal: true });
     mocks.sendInboxStep.mockResolvedValue("delivered");
@@ -160,6 +162,20 @@ describe("turn workflow ownership", () => {
     await expect(turnWorkflow(input)).rejects.toThrow("claim failed");
     expect(inbox.dispose).toHaveBeenCalledOnce();
     expect(mocks.failTurnStep).not.toHaveBeenCalled();
+  });
+
+  it("releases ownership without finalizing or deferring a nonexistent session", async () => {
+    const { inbox } = testInbox();
+    mocks.createOwnerInbox.mockReturnValue(inbox);
+    const retired: TurnReceipt = { terminal: true, deliveries: { input: "retired" } };
+    vi.mocked(executeTurnStep).mockResolvedValueOnce({
+      result: { kind: "receipt", receipt: retired },
+    });
+    await expect(turnWorkflow(input)).resolves.toEqual(retired);
+    expect(inbox.dispose).toHaveBeenCalledOnce();
+    expect(mocks.finalizeTurnStep).not.toHaveBeenCalled();
+    expect(mocks.failTurnStep).not.toHaveBeenCalled();
+    expect(mocks.deferTurnStep).not.toHaveBeenCalled();
   });
 
   it("delegates exhausted storage errors to durable ownership inspection", async () => {

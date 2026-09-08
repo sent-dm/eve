@@ -91,7 +91,7 @@ describe("ordinary turn storage budget", () => {
           expect(events.filter((event) => event.type === "step.completed")).toHaveLength(1);
           expect(events.at(-1)?.type).toBe("session.waiting");
           expect(Object.values(calls).reduce((sum, count) => sum + count, 0)).toBeLessThanOrEqual(
-            index === 0 ? 12 : 10,
+            index === 0 ? 10 : 8,
           );
         }
         return samples;

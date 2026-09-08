@@ -102,7 +102,7 @@ catalogs:
       version: 16.3.1
 
 patchedDependencies:
-  '@workflow/core@5.0.0-beta.47': d42590e95685088de4c5cdefad6dd1b9ab2724964442ba68245f2e1cdc25909b
+  '@workflow/core@5.0.0-beta.47': 5fea72e9f9b501fae7c03ff206376fecbf9c0135745b09f871b6cbe7b87aca2a
   '@workflow/world-postgres@5.0.0-beta.39': ac777c1b67d23b0dd34e96ae513c647174f9e1a68ae3cb15692b6f58775c1ddd
 
 importers:
@@ -1385,7 +1385,7 @@ importers:
         version: 5.0.0-beta.47(@opentelemetry/api@1.9.1)(@swc/helpers@0.5.23)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))
       '@workflow/core':
         specifier: 5.0.0-beta.47
-        version: 5.0.0-beta.47(patch_hash=d42590e95685088de4c5cdefad6dd1b9ab2724964442ba68245f2e1cdc25909b)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))
+        version: 5.0.0-beta.47(patch_hash=5fea72e9f9b501fae7c03ff206376fecbf9c0135745b09f871b6cbe7b87aca2a)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))
       '@workflow/errors':
         specifier: 5.0.0-beta.19
         version: 5.0.0-beta.19
@@ -23269,7 +23269,7 @@ snapshots:
   '@workflow/builders@5.0.0-beta.47(@opentelemetry/api@1.9.1)(@swc/helpers@0.5.23)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))':
     dependencies:
       '@swc/core': 1.15.3(@swc/helpers@0.5.23)
-      '@workflow/core': 5.0.0-beta.47(patch_hash=d42590e95685088de4c5cdefad6dd1b9ab2724964442ba68245f2e1cdc25909b)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))
+      '@workflow/core': 5.0.0-beta.47(patch_hash=5fea72e9f9b501fae7c03ff206376fecbf9c0135745b09f871b6cbe7b87aca2a)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))
       '@workflow/errors': 5.0.0-beta.19
       '@workflow/swc-plugin': 5.0.0-beta.5(@swc/core@1.15.3(@swc/helpers@0.5.23))
       '@workflow/utils': 5.0.0-beta.10
@@ -23288,7 +23288,7 @@ snapshots:
       - utf-8-validate
       - ws
 
-  '@workflow/core@5.0.0-beta.47(patch_hash=d42590e95685088de4c5cdefad6dd1b9ab2724964442ba68245f2e1cdc25909b)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))':
+  '@workflow/core@5.0.0-beta.47(patch_hash=5fea72e9f9b501fae7c03ff206376fecbf9c0135745b09f871b6cbe7b87aca2a)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)(supports-color@10.2.2)(ws@8.21.3(bufferutil@4.1.0))':
     dependencies:
       '@aws-sdk/credential-provider-web-identity': 3.972.49
       '@jridgewell/trace-mapping': 0.3.31
