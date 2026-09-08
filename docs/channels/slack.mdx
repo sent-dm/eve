@@ -439,14 +439,13 @@ export default slackChannel({
 
 HITL renders as Slack buttons and selects. Fixed-choice actions and freeform modal submissions pass through `onInputResponse` before the parked session resumes. The initial **Type your answer** action only opens eve's modal; the hook runs when the user submits an answer.
 
-Set `privateToolApprovals` when tool inputs must be visible only to one reviewer. `"ephemeral"` keeps the preview and controls in the original thread but visible only to the reviewer. `"direct-message"` opens an IM with the bot and routes the response back to the original session; add the `im:write` bot scope. By default eve targets the Slack user who triggered the turn, or provide `reviewer` to resolve another user:
+Set `privateToolApprovals` when tool inputs must be visible only to one reviewer. eve sends the preview and controls to the reviewer's direct messages, routes the response back to the original session, and posts `Waiting on approval from @reviewer…` in the session thread without exposing the tool input. Add the `im:write` bot scope. By default eve targets the Slack user who triggered the turn, or provide `reviewer` to resolve another user:
 
 ```ts title="agent/channels/slack.ts"
 import { slackChannel } from "eve/channels/slack";
 
 export default slackChannel({
   privateToolApprovals: {
-    delivery: "direct-message",
     when: (request) => request.action.toolName === "review_answer",
     reviewer: (_request, ctx) =>
       String(ctx.session.auth.current?.attributes.reviewerUserId ?? "") || null,

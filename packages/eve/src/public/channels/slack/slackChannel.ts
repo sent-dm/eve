@@ -198,8 +198,6 @@ export interface SlackPendingApprovalCard {
   readonly messageChannelId?: string;
   readonly messageBlocks: readonly unknown[];
   readonly messageTs: string;
-  /** Ephemeral cards cannot be updated with `chat.update`. */
-  readonly ephemeral?: boolean;
 }
 
 export interface SlackChannelState {
@@ -617,11 +615,11 @@ export interface SlackChannelConfig {
   readonly botName?: string;
 
   /**
-   * Delivers tool-approval previews and controls only to one Slack reviewer.
-   * Questions and session-limit prompts retain the normal thread rendering.
+   * Delivers tool-approval previews and controls by direct message to one Slack reviewer.
+   * The session thread names the reviewer without exposing the tool input. Questions and
+   * session-limit prompts retain the normal thread rendering.
    */
   readonly privateToolApprovals?: {
-    readonly delivery: "direct-message" | "ephemeral";
     /** Limits private delivery to matching approvals. Defaults to every tool approval. */
     readonly when?: (request: InputRequest, ctx: SessionContext) => boolean | Promise<boolean>;
     /** Defaults to the Slack user who triggered the active turn. */

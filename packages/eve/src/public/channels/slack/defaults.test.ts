@@ -79,34 +79,10 @@ function authRequiredEvent(
 }
 
 describe("defaultInputRequestedHandler private tool approvals", () => {
-  it("delivers the preview and controls ephemerally to the current reviewer", async () => {
-    const { channel, post, postEphemeral } = buildChannelStub();
-    const ctx = sessionContext({
-      attributes: { user_id: "U777" },
-      authenticator: "slack-webhook",
-      principalId: "slack:T1:U777",
-      principalType: "user",
-    });
-
-    await defaultInputRequestedHandler({ delivery: "ephemeral" })(
-      { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
-      channel,
-      ctx,
-    );
-
-    expect(post).not.toHaveBeenCalled();
-    expect(postEphemeral).toHaveBeenCalledTimes(2);
-    expect(postEphemeral.mock.calls.every(([userId]) => userId === "U777")).toBe(true);
-    const rendered = JSON.stringify(postEphemeral.mock.calls);
-    expect(rendered).toContain("private draft");
-    expect(rendered).toContain("eve_input:route:C123:111.222:tool-approval:approval-1");
-  });
-
   it("keeps nonmatching approvals in the public thread", async () => {
     const { channel, post, postDirectMessage } = buildChannelStub();
 
     await defaultInputRequestedHandler({
-      delivery: "direct-message",
       when: () => false,
     })(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
@@ -124,7 +100,6 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     });
 
     await defaultInputRequestedHandler({
-      delivery: "direct-message",
       reviewer: () => null,
     })(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
@@ -141,7 +116,6 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     const { channel, post, postDirectMessage } = buildChannelStub();
 
     await defaultInputRequestedHandler({
-      delivery: "direct-message",
       reviewer: () => "U_REVIEWER",
     })(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
@@ -149,9 +123,12 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
       sessionCtx,
     );
 
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith("Waiting on approval from <@U_REVIEWER>…");
     expect(postDirectMessage).toHaveBeenCalledTimes(2);
     expect(postDirectMessage.mock.calls.every(([userId]) => userId === "U_REVIEWER")).toBe(true);
+    const rendered = JSON.stringify(postDirectMessage.mock.calls);
+    expect(rendered).toContain("private draft");
+    expect(rendered).toContain("eve_input:route:C123:111.222:tool-approval:approval-1");
     expect(channel.state.pendingApprovalCards?.["approval-1"]?.messageChannelId).toBe("D123");
   });
 });

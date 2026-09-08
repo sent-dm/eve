@@ -234,12 +234,8 @@ export function defaultInputRequestedHandler(
         });
         continue;
       }
-      await postPrivateToolApproval({
-        channel,
-        delivery: privateToolApprovals!.delivery,
-        request,
-        reviewer,
-      });
+      await postPrivateToolApproval({ channel, request, reviewer });
+      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
     }
   };
 }
@@ -259,7 +255,6 @@ async function postPublicInputRequests(
 
 async function postPrivateToolApproval(input: {
   readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
-  readonly delivery: "direct-message" | "ephemeral";
   readonly request: InputRequest;
   readonly reviewer: string;
 }): Promise<void> {
@@ -268,10 +263,7 @@ async function postPrivateToolApproval(input: {
     channelId: input.channel.slack.channelId,
     threadTs: input.channel.slack.threadTs,
   };
-  const post =
-    input.delivery === "ephemeral"
-      ? input.channel.thread.postEphemeral.bind(input.channel.thread, input.reviewer)
-      : input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
+  const post = input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
   if (parts.details !== undefined) {
     await post({ blocks: routeHitlBlocks(parts.details.blocks, route), text: parts.details.text });
   }
@@ -279,12 +271,8 @@ async function postPrivateToolApproval(input: {
   const message = await post({ blocks: controlBlocks, text: parts.controls.text });
   recordApprovalCards(input.channel.state, [input.request], {
     messageBlocks: controlBlocks,
-    messageChannelId:
-      input.delivery === "direct-message" && typeof message.raw.channel === "string"
-        ? message.raw.channel
-        : undefined,
+    messageChannelId: typeof message.raw.channel === "string" ? message.raw.channel : undefined,
     messageTs: message.id,
-    ephemeral: input.delivery === "ephemeral",
   });
 }
 
@@ -369,12 +357,6 @@ export const defaultEvents: SlackChannelInternalEvents = {
     const cards = channel.state.pendingApprovalCards ?? {};
     const card = cards[event.requestId];
     if (card === undefined) return;
-    if (card.ephemeral === true) {
-      const next = { ...cards };
-      delete next[event.requestId];
-      channel.state.pendingApprovalCards = next;
-      return;
-    }
     const messageChannelId = card.messageChannelId ?? channel.state.channelId;
     if (messageChannelId === null) return;
     const answerLabel = event.outcome === "approved" ? "Approve" : "Cancel";
