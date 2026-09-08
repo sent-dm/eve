@@ -4,7 +4,7 @@ import { createOwnerInbox } from "#execution/inbox/owner.js";
 import type { InboxEnvelope, OwnerInbox } from "#execution/inbox/types.js";
 import { sendInboxStep } from "#execution/inbox/send.js";
 import { awaitTurnStep, forwardSubmissionStep } from "#execution/turn/admission.js";
-import { awaitRunStep } from "#internal/workflow/await-run.js";
+import { awaitRunStep } from "#execution/await-run.js";
 import { executeTurnStep } from "#execution/turn/execute.js";
 import { failTurnStep, finalizeTurnStep } from "#execution/turn/finalize.js";
 import {

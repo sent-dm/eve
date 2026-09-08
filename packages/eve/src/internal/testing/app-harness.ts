@@ -165,19 +165,20 @@ const TEST_SANDBOX_BACKEND: SandboxBackend = {
 };
 
 export async function createTestRuntime(descriptor: TestAppDescriptor = {}): Promise<TestRuntime> {
+  const modules = [...(descriptor.modules ?? [])];
+  if (!modules.some((module) => module.logicalPath === "sandbox.ts")) {
+    modules.unshift({
+      loadNamespace: async () => ({
+        default: defineSandbox({ backend: TEST_SANDBOX_BACKEND }),
+      }),
+      logicalPath: "sandbox.ts",
+    });
+  }
   const compileInput: CompileFromMemoryInput = {
     name: descriptor.agent?.name ?? DEFAULT_AGENT_NAME,
     model: descriptor.agent?.model ?? TEST_DEFAULT_MODEL_ID,
     limits: descriptor.agent?.limits,
-    modules: [
-      {
-        loadNamespace: async () => ({
-          default: defineSandbox({ backend: TEST_SANDBOX_BACKEND }),
-        }),
-        logicalPath: "sandbox.ts",
-      },
-      ...(descriptor.modules ?? []),
-    ],
+    modules,
     outputSchema: descriptor.agent?.outputSchema,
   };
 

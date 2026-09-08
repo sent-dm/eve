@@ -75,3 +75,6 @@ minimumReleaseAgeExclude:
   - nitro
   - run
   - workflow
+
+patchedDependencies:
+  "@workflow/core@5.0.0-beta.47": patches/@workflow__core@5.0.0-beta.47.patch

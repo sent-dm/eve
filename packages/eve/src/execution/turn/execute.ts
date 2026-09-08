@@ -174,6 +174,12 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     await publishSessionDescriptor(input.session.holderRunId, input.session);
   }
 
+  // Choosing another execution boundary admits the preceding model proposal.
+  // Its rollback must not erase tools or child handles committed afterward.
+  if (checkpoint.result !== undefined) {
+    const { cancellationState, cancellationContext, ...result } = checkpoint.result;
+    checkpoint = { ...checkpoint, result };
+  }
   const admitted = checkpoint;
   checkpoint = await sessionEvents.withWriter(input.session.events, async (events) => {
     let state = admitted;

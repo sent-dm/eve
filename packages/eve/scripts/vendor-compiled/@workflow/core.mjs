@@ -167,6 +167,15 @@ export default {
   packageName: "@workflow/core",
   compiledPath: "@workflow/core",
   chunkGroup: "workflow",
+  // The temporary dependency patch changes these artifacts without changing the package version.
+  fingerprintFiles: [
+    "dist/runtime.js",
+    "dist/runtime.d.ts",
+    "dist/runtime/run.js",
+    "dist/runtime/run.d.ts",
+    "dist/serialization.js",
+    "dist/serialization.d.ts",
+  ],
   plugins: [stubCoreWorldFactories(), stubCoreQuickJSEntrypoint(), transformWorkflowSdk("step")],
   entries: [
     {

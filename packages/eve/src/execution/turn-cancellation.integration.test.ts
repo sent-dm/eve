@@ -14,12 +14,13 @@ import { sessionCommandToken } from "#execution/session-command-token.js";
 import { activeTurnToken } from "#execution/turn/address.js";
 import { waitForTurnReceipt } from "#execution/turn/admission.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
+import { sessionEvents } from "#execution/session/events.js";
 import type { SessionCheckpoint } from "#execution/turn/types.js";
 import { startTestSession } from "#internal/testing/session.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
 import { dispatchSessionCommandByToken } from "#execution/session/ingress.js";
 import { createEveSessionCancelRoutePath } from "#protocol/routes.js";
-import type { UnstampedMessageStreamEvent } from "#protocol/message.js";
+import type { MessageStreamEvent, UnstampedMessageStreamEvent } from "#protocol/message.js";
 import { createChannelAddress } from "#channel/channel-address.js";
 import type { RouteHandlerArgs } from "#channel/routes.js";
 import { createSession } from "#channel/session.js";
@@ -240,9 +241,9 @@ async function expectCancelResponse(
 }
 
 describe("turn cancellation integration", () => {
-  it("buffers a default steering message before replacing the active turn", async () => {
-    const fixture = await createWaitToolRuntime("turn-steer-message");
-    const rawToken = "turn-steer-message";
+  it("interrupts an active turn and continues its replacement without an idle gap", async () => {
+    const fixture = await createWaitToolRuntime("turn-interrupt-message");
+    const rawToken = "turn-interrupt-message";
     const continuationToken = `http:${rawToken}`;
     const workflowRuntime = createWorkflowRuntime({
       compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
@@ -268,33 +269,46 @@ describe("turn cancellation integration", () => {
       try {
         await requireHookOwner(continuationToken);
         await fixture.toolStarted;
+        const owner = await requireHookOwner(activeTurnToken(run.sessionId));
 
         await expect(
-          address.send("replacement after steer", { auth: null }),
+          address.send("replacement after interruption", { auth: null, turnPolicy: "interrupt" }),
         ).resolves.toMatchObject({ id: run.sessionId });
 
-        const cancelledTurn = await stream.nextTurn();
+        const continuation = await stream.nextTurn();
         expect(
-          containsEventSequence(cancelledTurn, [
+          containsEventSequence(continuation, [
             "turn.started",
-            "turn.cancelled",
+            "turn.interrupted",
+            "turn.started",
+            "turn.completed",
             "session.waiting",
           ]),
         ).toBe(true);
         expect(fixture.toolAborts()).toBe(1);
-
-        const replacementTurn = await stream.nextTurn();
-        expect(filterEventsByType(replacementTurn, "turn.started")).toHaveLength(1);
-        expect(filterEventsByType(replacementTurn, "turn.cancelled")).toHaveLength(0);
-        expectNoFailureEvents(replacementTurn);
+        expect(fixture.toolStarts()).toBe(1);
+        const starts = filterEventsByType(continuation, "turn.started");
+        expect(starts).toHaveLength(2);
+        expect(starts[0]!.data.turnId).toBe(`turn_${owner.runId}`);
+        expect(starts[1]!.data.turnId).not.toBe(starts[0]!.data.turnId);
+        expect(filterEventsByType(continuation, "turn.interrupted")).toMatchObject([
+          { data: { turnId: starts[0]!.data.turnId } },
+        ]);
+        expect(filterEventsByType(continuation, "turn.completed")).toMatchObject([
+          { data: { turnId: starts[1]!.data.turnId } },
+        ]);
+        expect(filterEventsByType(continuation, "session.waiting")).toHaveLength(1);
+        expect(filterEventsByType(continuation, "turn.cancelled")).toHaveLength(0);
+        expectNoFailureEvents(continuation);
         expect(
-          replacementTurn.some(
+          continuation.some(
             (event) =>
-              event.type === "message.received" &&
-              typeof event.data.message === "string" &&
-              event.data.message.includes("replacement after steer"),
+              event.type === "message.completed" &&
+              event.data.message?.includes("replacement after interruption") === true,
           ),
         ).toBe(true);
+        await waitForTurnReceipt(owner.runId);
+        await expectNoStepRetries(owner.runId);
       } finally {
         stream.dispose();
         await run.cancel();
@@ -602,7 +616,7 @@ describe("turn cancellation integration", () => {
     });
   }, 60_000);
 
-  it("cancels a turn parked on a child HITL request without corrupting the stream", async () => {
+  it("cancels an open turn waiting on a child HITL request without reopening the child", async () => {
     const runtime = await createTestRuntime({
       agent: { name: "turn-cancel-hitl" },
       modules: [
@@ -632,17 +646,25 @@ describe("turn cancellation integration", () => {
       const stream = captureTurnEvents(run);
 
       try {
-        // The child asks a question; the proxy epilogue emits this turn's
-        // waiting boundary while the parent keeps waiting on the child.
-        const hitlTurn = await stream.nextTurn();
-        expect(hitlTurn.at(-1)?.type, JSON.stringify(hitlTurn.at(-1), null, 2)).toBe(
-          "session.waiting",
-        );
-        const requested = filterEventsByType(hitlTurn, "input.requested");
+        const progress = sessionEvents.read(run.resources.events).getReader();
+        const prompting: MessageStreamEvent[] = [];
+        try {
+          while (true) {
+            const next = await progress.read();
+            if (next.done) throw new Error("Session ended before the child requested input.");
+            prompting.push(next.value);
+            if (next.value.type === "input.requested") break;
+          }
+        } finally {
+          await progress.cancel();
+          progress.releaseLock();
+        }
+        expect(filterEventsByType(prompting, "session.waiting")).toHaveLength(0);
+        const requested = filterEventsByType(prompting, "input.requested");
         expect(requested).toHaveLength(1);
         const requestId = requested[0]?.data.requests[0]?.requestId;
         expect(requestId).toBeDefined();
-        const childSessionId = filterEventsByType(hitlTurn, "subagent.called")[0]?.data
+        const childSessionId = filterEventsByType(prompting, "subagent.called")[0]?.data
           .childSessionId;
         expect(childSessionId).toBeDefined();
 
@@ -654,8 +676,19 @@ describe("turn cancellation integration", () => {
         // beats the cancel is legitimately routed to the still-live child.
         await waitForTurnReceipt(cancelHook.runId);
 
-        // The boundary is already on the stream: settling must not emit a
-        // fabricated turn.cancelled or a second session.waiting.
+        const cancelledTurn = await stream.nextTurn();
+        expect(
+          containsEventSequence(cancelledTurn, [
+            "turn.started",
+            "input.requested",
+            "turn.cancelled",
+            "session.waiting",
+          ]),
+        ).toBe(true);
+        expect(filterEventsByType(cancelledTurn, "turn.cancelled")).toHaveLength(1);
+        expect(filterEventsByType(cancelledTurn, "session.waiting")).toHaveLength(1);
+        expectNoFailureEvents(cancelledTurn);
+
         const world = await getWorld();
         const answer = {
           kind: "send" as const,

@@ -8,7 +8,6 @@ import {
 import { sessionEvents } from "#execution/session/events.js";
 import { createSessionResources } from "#execution/session/resources.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
-import { getRunWritable } from "#internal/workflow/run-writable.js";
 import { createSessionStartedEvent, stampMessageStreamEvent } from "#protocol/message.js";
 
 const runtime = vi.hoisted(() => ({ getRun: vi.fn(), getWorld: vi.fn() }));
@@ -24,6 +23,9 @@ let failWrite: string | undefined;
 let pauseFlush: Promise<void> | undefined;
 let reads = 0;
 let cancellations = 0;
+const nativeWritables: WritableStream[] = [];
+let nativeWriterAcquisitions = 0;
+let nativeWriterReleases = 0;
 
 function streamKey(runId: string, namespace: string | undefined): string {
   return JSON.stringify([runId, namespace ?? null]);
@@ -44,8 +46,12 @@ beforeEach(() => {
   pauseFlush = undefined;
   reads = 0;
   cancellations = 0;
+  nativeWritables.length = 0;
+  nativeWriterAcquisitions = 0;
+  nativeWriterReleases = 0;
   runtime.getWorld.mockResolvedValue({});
   runtime.getRun.mockImplementation((runId: string) => ({
+    status: Promise.resolve("running"),
     getReadable: (options: { namespace?: string; startIndex?: number } = {}) => {
       const source = stored(streamKey(runId, options.namespace));
       let index = options.startIndex ?? 0;
@@ -92,12 +98,15 @@ beforeEach(() => {
           closing = true;
         },
       });
+      nativeWritables.push(writable);
       const getWriter = writable.getWriter.bind(writable);
       writable.getWriter = () => {
+        nativeWriterAcquisitions++;
         const writer = getWriter();
         const release = writer.releaseLock.bind(writer);
         writer.releaseLock = () => {
           release();
+          nativeWriterReleases++;
           finish();
         };
         return writer;
@@ -112,6 +121,14 @@ afterEach(() => {
 });
 
 describe("session directory", () => {
+  it("rejects a missing holder before opening a reader", async () => {
+    const failure = new Error("Holder not found");
+    runtime.getRun.mockReturnValueOnce({ status: Promise.reject(failure) });
+    await expect(sessionDirectory.resolveHolder("missing")).rejects.toBe(failure);
+    expect(reads).toBe(0);
+    expect(streams.size).toBe(0);
+  });
+
   it("resolves the canonical descriptor after duplicate holder bootstrap", async () => {
     const resources = createSessionResources("winner", "first");
     await initializeSessionResources(resources);
@@ -213,6 +230,57 @@ describe("session snapshots", () => {
 });
 
 describe("session event writes", () => {
+  it("holds one native writer through delayed acquisition and borrower lock gaps", async () => {
+    const { events } = createSessionResources("holder", "first");
+    const entered = Promise.withResolvers<void>();
+    const start = Promise.withResolvers<void>();
+    const between = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const returned = Promise.withResolvers<void>();
+    const flush = Promise.withResolvers<void>();
+    pauseFlush = flush.promise;
+    let completed = false;
+    const pending = sessionEvents
+      .withWriter(events, async (writable) => {
+        entered.resolve();
+        await start.promise;
+        const first = writable.getWriter();
+        await first.write(new Uint8Array([1]));
+        first.releaseLock();
+        between.resolve();
+        await resume.promise;
+        const second = writable.getWriter();
+        await second.write(new Uint8Array([2]));
+        second.releaseLock();
+        returned.resolve();
+      })
+      .then(() => {
+        completed = true;
+      });
+
+    await entered.promise;
+    expect(nativeWritables[0]?.locked).toBe(true);
+    expect(nativeWriterAcquisitions).toBe(1);
+    start.resolve();
+    await between.promise;
+    expect(nativeWritables[0]?.locked).toBe(true);
+    expect(nativeWriterReleases).toBe(0);
+    resume.resolve();
+    await returned.promise;
+    await Promise.resolve();
+    expect(nativeWriterAcquisitions).toBe(1);
+    expect(nativeWriterReleases).toBe(1);
+    expect(nativeWritables[0]?.locked).toBe(false);
+    expect(completed).toBe(false);
+    expect(stored(events.id).chunks).toEqual([]);
+    flush.resolve();
+    await pending;
+    expect(stored(events.id)).toEqual({
+      chunks: [new Uint8Array([1]), new Uint8Array([2])],
+      closed: false,
+    });
+  });
+
   it("waits for released writer operations to persist without closing the shared stream", async () => {
     const { events } = createSessionResources("holder", "first");
     let flush!: () => void;
@@ -272,8 +340,19 @@ describe("session event writes", () => {
     });
   });
 
-  it("fails explicitly when the installed SDK lacks the new public API", async () => {
-    runtime.getRun.mockReturnValue({});
-    await expect(getRunWritable("holder", {})).rejects.toThrow("Run#getWritable");
+  it("releases the native writer and flushes even when a failing callback keeps its borrower locked", async () => {
+    const { events } = createSessionResources("holder", "first");
+    const failure = new Error("Callback failed");
+    const pending = sessionEvents.withWriter(events, async (writable) => {
+      const writer = writable.getWriter();
+      await writer.write(new Uint8Array([1]));
+      throw failure;
+    });
+    await expect(pending).rejects.toMatchObject({
+      errors: [failure, expect.objectContaining({ message: expect.stringContaining("released") })],
+    });
+    expect(nativeWriterReleases).toBe(1);
+    expect(nativeWritables[0]?.locked).toBe(false);
+    expect(stored(events.id)).toEqual({ chunks: [new Uint8Array([1])], closed: false });
   });
 });

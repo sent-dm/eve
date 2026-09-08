@@ -7,6 +7,7 @@ import {
 } from "#execution/session/state.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
 import { recordWorkflowToolRun } from "#harness/workflow-tool-runs.js";
+import { getAgentHandleStore, writeHandles } from "#subagents/handles/store.js";
 import type {
   AcceptedSubmission,
   InitializedSessionCheckpoint,
@@ -197,6 +198,8 @@ describe("turn execution boundary", () => {
       writerRunId: owner.ownerRunId,
       result: {
         action: "park",
+        cancellationState: checkpoint.state,
+        cancellationContext: { beforeDispatch: true },
         hasPendingAuthorization: false,
         hasPendingInputBatch: false,
         pendingCoordinationCallIds: ["call"],
@@ -216,6 +219,10 @@ describe("turn execution boundary", () => {
     expect(mocks.append.mock.lastCall?.[1]).toMatchObject({
       pendingToolAcks: [tool],
     });
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    expect(committed.result).not.toHaveProperty("cancellationState");
+    expect(committed.result).not.toHaveProperty("cancellationContext");
+    expect(committed.result?.cancellationState ?? committed.state).toEqual(dispatchedState);
     expect(mocks.acknowledgeTools).toHaveBeenCalledWith({ runs: [tool] });
     expect(mocks.append.mock.invocationCallOrder[1]).toBeLessThan(
       mocks.acknowledgeTools.mock.invocationCallOrder[0]!,
@@ -223,6 +230,69 @@ describe("turn execution boundary", () => {
     expect(mocks.append.mock.invocationCallOrder[1]).toBeLessThan(
       mocks.acknowledge.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it("retains committed child admission and context when cancelling after runtime progress", async () => {
+    const before = checkpoint.state;
+    checkpoint = {
+      ...checkpoint,
+      phase: "running",
+      writerRunId: owner.ownerRunId,
+      result: {
+        action: "park",
+        cancellationState: before,
+        cancellationContext: { beforeInvocation: true },
+        hasPendingAuthorization: false,
+        hasPendingInputBatch: false,
+        pendingCoordinationCallIds: ["call"],
+        sessionState: before,
+        serializedContext: {},
+      },
+      dispatched: true,
+    };
+    const handle = {
+      phase: "claimed",
+      ownerId: "tool-run",
+      operationId: "invocation",
+      callId: "child-call",
+      identity: { id: "agent-id", name: "worker", nodeId: "subagents/worker" },
+      address: { kind: "agent/local", sessionId: "child", continuationToken: "child-alias" },
+    } as const;
+    const state = replaceDurableSessionSnapshot({
+      session: writeHandles(before.snapshot.session, [handle]),
+    });
+    const serializedContext = { afterInvocation: true };
+    mocks.runtime.mockResolvedValue({
+      state,
+      serializedContext,
+      results: [],
+      acceptedAtMsByCallId: {},
+    });
+
+    await run({ checkpoint: ref, work: { kind: "events", envelopes: [] } });
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    const cancellationState = committed.result?.cancellationState ?? committed.state;
+    expect(getAgentHandleStore(cancellationState.snapshot.session.state)?.handles).toEqual([
+      handle,
+    ]);
+    expect(committed.result?.cancellationContext ?? committed.serializedContext).toEqual(
+      serializedContext,
+    );
+  });
+
+  it("retains the current model rollback until another execution boundary admits it", async () => {
+    const cancellationState = checkpoint.state;
+    const cancellationContext = { retained: true };
+    mocks.model.mockResolvedValue({
+      action: "continue",
+      cancellationState,
+      cancellationContext,
+      sessionState: checkpoint.state,
+      serializedContext: {},
+    });
+    await run();
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    expect(committed.result).toMatchObject({ cancellationState, cancellationContext });
   });
 
   it("routes answers to a waiting child without running the model or losing queued messages", async () => {

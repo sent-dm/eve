@@ -1,5 +1,4 @@
 import { getRun } from "#internal/workflow/runtime.js";
-import { getRunWritable } from "#internal/workflow/run-writable.js";
 import { decodeStreamLocation } from "#execution/session/stream-location.js";
 
 const READ_TIMEOUT_MS = 10_000;
@@ -48,26 +47,32 @@ export async function withStreamWriter<T, Result>(
 ): Promise<Result> {
   const { runId, namespace } = decodeStreamLocation(id);
   const ops: Promise<unknown>[] = [];
-  const writable = await getRunWritable<T>(runId, { namespace, ops });
+  const owner = (await getRun(runId).getWritable<T>({ namespace, ops })).getWriter();
+  // The SDK treats an unlocked writer as finished. Borrower lock gaps must not
+  // settle its durability barrier before the complete callback has written.
+  const writable = new WritableStream<T>({
+    write: (value) => owner.write(value),
+    close: () => owner.close(),
+    abort: (reason) => owner.abort(reason),
+  });
   let outcome: { kind: "returned"; value: Result } | { kind: "threw"; error: unknown };
   try {
     outcome = { kind: "returned", value: await run(writable) };
   } catch (error) {
     outcome = { kind: "threw", error };
+  } finally {
+    owner.releaseLock();
   }
+  const failures: unknown[] = [];
   if (writable.locked) {
-    const error = new Error(
-      "Session stream writer must be released before completing its operation.",
+    failures.push(
+      new Error("Session stream writer must be released before completing its operation."),
     );
-    if (outcome.kind === "threw")
-      throw new AggregateError(
-        [outcome.error, error],
-        "Session stream operation failed before releasing its writer.",
-      );
-    throw error;
   }
-  const failures = (await Promise.allSettled(ops)).flatMap((result) =>
-    result.status === "rejected" ? [result.reason] : [],
+  failures.push(
+    ...(await Promise.allSettled(ops)).flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    ),
   );
   if (outcome.kind === "threw") {
     if (failures.length > 0)

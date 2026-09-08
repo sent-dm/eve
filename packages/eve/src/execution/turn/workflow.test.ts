@@ -37,7 +37,7 @@ vi.mock("#execution/turn/admission.js", () => ({
   forwardSubmissionStep: mocks.forwardSubmissionStep,
   awaitTurnStep: mocks.awaitTurnStep,
 }));
-vi.mock("#internal/workflow/await-run.js", () => ({
+vi.mock("#execution/await-run.js", () => ({
   awaitRunStep: mocks.awaitRunStep,
 }));
 import { turnWorkflow } from "#execution/turn/workflow.js";

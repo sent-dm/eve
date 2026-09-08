@@ -1,7 +1,7 @@
 ---
 issue: none
 status: in-progress
-last_updated: "2026-09-04"
+last_updated: "2026-09-08"
 ---
 
 # Stable session storage, a small holder, and independent turns
@@ -500,7 +500,8 @@ streams and passes it directly into its first start. There is no discovery read
 on that dispatch path. For an existing Slack conversation, the sequence is:
 
 ```text
-continuation lookup -> holder ID -> cached descriptor or one descriptor read
+continuation lookup -> holder ID -> cached descriptor
+  or validate holder existence -> read descriptor
   -> start({ session: resources, submission })
   -> claim active-turn(sessionId)
      owned: first execution step reads snapshot, admits input, and executes work
@@ -514,6 +515,11 @@ to decide whether a turn is idle, or reread the descriptor inside the candidate.
 Those reads cannot reserve ownership. Required authorization reads still precede
 admission; execution policy, deduplication, and closure checks use state under the
 winning claim.
+
+The current stream API can wait on a stream whose run never existed. On a descriptor
+cache miss, the directory first reads holder metadata so unknown session IDs fail
+immediately instead of waiting for bootstrap. Cache hits avoid both reads. This is
+an existence check, not a read of mutable turn state; include its cost in measurements.
 
 Reading an immutable descriptor before start is consistent because neither another
 turn nor rekey can change its contents. Persisting it in workflow input therefore
@@ -973,8 +979,13 @@ Runtime implementation must update session/storage documentation, steering and
 `turn.interrupted` semantics, additive rekey, recovery behavior, and the Promise-based
 `ask()` API. Include the public API changes' minor changeset and fixture coverage.
 The replacement runtime and accompanying public documentation are implemented.
-Full stream and end-to-end validation remain gated on the SDK update that enables
-writes to another workflow's stream by stable identifier.
+A version-pinned dependency patch supplies `Run#getWritable()` until the SDK
+release includes it; see [patch maintenance](../patches/README.md). Native integration
+tests verify independent contributors, snapshot restoration, shared stream lifetime,
+and owner-key encryption. Stream values must be supported by the SDK serializer:
+Maps and typed arrays round-trip; File and Blob objects are not supported. Native
+lifecycle tests also cover interruption, child cancellation, reset, and retries.
+Hosted behavior and end-to-end coverage still require the fixture CI results.
 
 Source inventory: [holding workflow](../packages/eve/src/execution/session/holding-workflow.ts),
 [turn workflow](../packages/eve/src/execution/turn/workflow.ts),

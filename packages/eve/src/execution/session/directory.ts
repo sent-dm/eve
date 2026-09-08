@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { getWorld } from "#internal/workflow/runtime.js";
+import { getRun, getWorld } from "#internal/workflow/runtime.js";
 import type { SessionResources } from "#execution/session/resources.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
 import { encodeStreamLocation } from "#execution/session/stream-location.js";
@@ -45,14 +45,15 @@ async function resolveHolder(holderRunId: string): Promise<SessionResources> {
   }
   const cached = cache.get(holderRunId);
   if (cached !== undefined) return cached;
-  const pending = readStreamRecord<SessionResources>(descriptorStream(holderRunId)).then(
-    (resources) => {
-      Object.freeze(resources.events);
-      Object.freeze(resources.snapshots);
-      Object.freeze(resources.control);
-      return Object.freeze(resources);
-    },
-  );
+  // A stream reader can wait on an address whose owner never existed. Validate
+  // cold lookups before waiting for bootstrap to publish the descriptor.
+  const pending = getRun(holderRunId).status.then(async () => {
+    const resources = await readStreamRecord<SessionResources>(descriptorStream(holderRunId));
+    Object.freeze(resources.events);
+    Object.freeze(resources.snapshots);
+    Object.freeze(resources.control);
+    return Object.freeze(resources);
+  });
   cache.set(holderRunId, pending);
   if (cache.size > DESCRIPTOR_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
   try {
