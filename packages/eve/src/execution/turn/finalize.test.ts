@@ -21,7 +21,6 @@ const mocks = vi.hoisted(() => ({
   closeSnapshots: vi.fn(),
   appendEvents: vi.fn(),
   closeEvents: vi.fn(),
-  publish: vi.fn(),
   finalize: vi.fn(),
   cancel: vi.fn(),
   cancelDescendants: vi.fn(),
@@ -33,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   callback: vi.fn(),
   cancelRun: vi.fn(),
   log: vi.fn(),
+  resolveSession: vi.fn(),
 }));
 vi.mock("#compiled/@workflow/core/index.js", () => ({
   getStepMetadata: () => ({ stepId: mocks.stepId }),
@@ -58,7 +58,9 @@ vi.mock("#execution/session/events.js", () => ({
     }),
   },
 }));
-vi.mock("#execution/session/directory.js", () => ({ publishSessionDescriptor: mocks.publish }));
+vi.mock("#execution/session/directory.js", () => ({
+  resolveSessionTarget: mocks.resolveSession,
+}));
 vi.mock("#execution/turn/finalize-model.js", () => ({ finalizeModelSettlement: mocks.finalize }));
 vi.mock("#execution/turn/cancel.js", () => ({
   cancellationSettlement: (state: InitializedSessionCheckpoint["state"], kind: string) => ({
@@ -140,6 +142,7 @@ function checkpoint(): InitializedSessionCheckpoint {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.resolveSession.mockResolvedValue(resources);
   mocks.stepId = "commit";
   records.clear();
   current = checkpoint();
@@ -415,10 +418,11 @@ describe("turn finalization", () => {
     };
     records.set(current.writeId, current);
     const result = await failTurnStep({
-      session: resources,
+      sessionId: resources.sessionId,
+      resources,
       eventIds: ["initial"],
-      submission: { eventId: "initial", command: { kind: "cancel" } },
-      error: "initial effects failed",
+
+      failure: { kind: "execution" as const, error: "initial effects failed" },
     });
     expect(result.terminal).toBe(true);
     expect(records.get("commit:entered")).toMatchObject({ source: { initial } });
@@ -440,10 +444,11 @@ describe("turn finalization", () => {
     ).rejects.toThrow("Lost completion");
     mocks.stepId = "failure";
     await failTurnStep({
-      session: resources,
+      sessionId: resources.sessionId,
+      resources,
       eventIds: ["initial"],
-      submission: { eventId: "initial", command: { kind: "cancel" } },
-      error: "finalization failed",
+
+      failure: { kind: "execution" as const, error: "finalization failed" },
     });
     expect(records.get("failure:entered")).toMatchObject({
       source: { ref: recordRef("proposal") },
@@ -456,24 +461,101 @@ describe("turn finalization", () => {
     mocks.open.mockRejectedValueOnce(new Error("Storage failed"));
     await expect(
       failTurnStep({
-        session: resources,
+        sessionId: resources.sessionId,
+        resources,
         eventIds: ["initial", "followup"],
-        submission: { eventId: "initial", command: { kind: "cancel" } },
-        error: "private failure",
+
+        failure: { kind: "execution" as const, error: "private failure" },
       }),
     ).rejects.toThrow("Storage failed");
     expect(mocks.appendEvents).not.toHaveBeenCalled();
-    expect(mocks.publish).not.toHaveBeenCalled();
+  });
+
+  it.each(["seed", "settled", "other-owner"] as const)(
+    "leaves %s state unchanged after exhausted storage reads",
+    async (kind) => {
+      records.clear();
+      const stored: TurnCheckpointRecord =
+        kind === "seed"
+          ? {
+              phase: "seed",
+              writeId: "seed",
+              submission: { eventId: "initial", command: { kind: "cancel" } },
+            }
+          : {
+              ...checkpoint(),
+              phase: kind === "settled" ? "settled" : "running",
+              writerRunId: "previous",
+            };
+      records.set(stored.writeId, stored);
+      current = stored;
+      await expect(
+        failTurnStep({
+          sessionId: resources.sessionId,
+          resources,
+          eventIds: ["followup"],
+          failure: { kind: "storage", error: new Error("read failed") },
+        }),
+      ).rejects.toMatchObject({ name: "SessionStorageUnavailableError" });
+      expect(mocks.append).not.toHaveBeenCalled();
+      expect(mocks.appendEvents).not.toHaveBeenCalled();
+      expect(mocks.cancelRun).not.toHaveBeenCalled();
+    },
+  );
+
+  it("settles its own durable effects when a later retry only reports a read failure", async () => {
+    const original = checkpoint();
+    const attempt: TurnCheckpointRecord = {
+      phase: "entered",
+      writeId: "execute:entered",
+      writerRunId: "owner",
+      source: { initial: original },
+    };
+    records.clear();
+    records.set(attempt.writeId, attempt);
+    current = attempt;
+    const result = await failTurnStep({
+      sessionId: resources.sessionId,
+      resources,
+      eventIds: ["initial"],
+      failure: { kind: "storage", error: new Error("later read failed") },
+    });
+    expect(result.terminal).toBe(true);
+    expect(records.get("commit")).toMatchObject({ phase: "terminal" });
+    expect(mocks.cancelRun).toHaveBeenCalled();
+  });
+
+  it("uses the entered marker owner when its source checkpoint belongs to the previous turn", async () => {
+    const source = { ...checkpoint(), phase: "settled" as const, writerRunId: "previous" };
+    records.clear();
+    records.set(source.writeId, source);
+    const attempt: TurnCheckpointRecord = {
+      phase: "entered",
+      writeId: "execute:entered",
+      writerRunId: "owner",
+      source: { ref: recordRef(source.writeId) },
+    };
+    records.set(attempt.writeId, attempt);
+    current = attempt;
+    const result = await failTurnStep({
+      sessionId: resources.sessionId,
+      resources,
+      eventIds: ["initial"],
+      failure: { kind: "storage", error: new Error("later read failed") },
+    });
+    expect(result.terminal).toBe(true);
+    expect(records.get("commit")).toMatchObject({ phase: "terminal" });
   });
 
   it("records initialization failure without inventing a harness snapshot or exposing the error", async () => {
     records.clear();
     current = undefined;
     const input = {
-      session: resources,
+      sessionId: resources.sessionId,
+      resources,
       eventIds: ["initial", "followup"],
       submission: { eventId: "initial", command: { kind: "cancel" as const } },
-      error: "private secret detail",
+      failure: { kind: "execution" as const, error: "private secret detail" },
     };
     const result = await failTurnStep(input);
     expect(result).toMatchObject({ terminal: true, deliveries: { initial: "retired" } });
@@ -494,13 +576,14 @@ describe("turn finalization", () => {
     current = undefined;
     mocks.appendEvents.mockRejectedValueOnce(new Error("Write completion unknown"));
     const input = {
-      session: resources,
+      sessionId: resources.sessionId,
+      resources,
       eventIds: ["initial", "followup"],
       submission: {
         eventId: "initial",
         command: { kind: "send" as const, payload: { message: "Hello" } },
       },
-      error: "private",
+      failure: { kind: "execution" as const, error: "private" },
     };
     await expect(failTurnStep(input)).rejects.toThrow("Write completion unknown");
     await expect(failTurnStep(input)).rejects.toThrow("did not commit its effects");

@@ -9,11 +9,14 @@ import { getStepMetadata, getWorkflowMetadata } from "#compiled/@workflow/core/i
 import { sessionEvents } from "#execution/session/events.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
 import { openCheckpointLog } from "#execution/turn/checkpoint-log.js";
-import { publishSessionDescriptor } from "#execution/session/directory.js";
-import type { SessionResources, SnapshotRecordRef } from "#execution/session/resources.js";
+import { resolveSessionTarget } from "#execution/session/directory.js";
+import type {
+  SessionResources,
+  SessionTarget,
+  SnapshotRecordRef,
+} from "#execution/session/resources.js";
 import type { InboxEnvelope } from "#execution/inbox/types.js";
 import type {
-  AcceptedSubmission,
   InitializationFailureCheckpoint,
   SessionCheckpoint,
   TurnReceipt,
@@ -42,6 +45,8 @@ import { cancelRun, getWorld } from "#internal/workflow/runtime.js";
 import { isTaskWorkflowTargetGone } from "#execution/tasks/workflow-target.js";
 import { createLogger } from "#internal/logging.js";
 import { notifyInitializationFailure } from "#execution/turn/initialization-failure.js";
+import { SessionStorageUnavailableError } from "#execution/session/storage-error.js";
+import { toErrorMessage } from "#shared/errors.js";
 
 const log = createLogger("execution.turn.finalize");
 const FAILURE_MESSAGE = "The turn could not complete safely.";
@@ -236,33 +241,45 @@ async function finalizeTurn(
   return receipt(ref, checkpoint, input.eventIds);
 }
 
-export async function failTurnStep(input: {
-  readonly eventIds: readonly string[];
-  readonly session: SessionResources;
-  readonly submission: AcceptedSubmission;
-  readonly checkpoint?: SnapshotRecordRef;
-  readonly error: string;
-}): Promise<TurnReceipt> {
+export async function failTurnStep(
+  target: SessionTarget & {
+    readonly eventIds: readonly string[];
+    readonly checkpoint?: SnapshotRecordRef;
+    readonly failure: { readonly kind: "storage" | "execution"; readonly error: unknown };
+  },
+): Promise<TurnReceipt> {
   "use step";
-  log.error("Turn execution failed", { sessionId: input.session.sessionId, error: input.error });
-  const writeId = getStepMetadata().stepId;
   const storage = createStreamStorageScope();
+  const session = await resolveSessionTarget(target, storage);
+  const input = {
+    ...target,
+    session,
+    eventIds: [...new Set([...target.eventIds, session.initialEventId])],
+  };
+  log.error("Turn execution failed", {
+    sessionId: input.session.sessionId,
+    error: toErrorMessage(input.failure.error),
+  });
+  const writeId = getStepMetadata().stepId;
   const snapshots = await openCheckpointLog(input.session.snapshots, storage);
   const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
     await closeSession(input.session, completed.checkpoint, storage);
     return receipt(completed.ref, completed.checkpoint, input.eventIds);
   }
   const entered = snapshots.completed(`${writeId}:entered`);
   if (entered?.checkpoint.phase === "initialization-failed") {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
     await closeSession(input.session, entered.checkpoint, storage);
     throw new Error("The previous initialization failure notification did not commit its effects.");
   }
   const latest = await snapshots.read(input.checkpoint);
+  if (
+    input.failure.kind === "storage" &&
+    snapshots.effectsOwnerRunId !== getWorkflowMetadata().workflowRunId
+  ) {
+    throw new SessionStorageUnavailableError(input.failure.error);
+  }
   if (latest !== undefined && latest.checkpoint.phase !== "initialization-failed") {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
     return await finalizeTurn(
       {
         session: input.session,
@@ -275,6 +292,7 @@ export async function failTurnStep(input: {
       snapshots,
     );
   }
+  const bootstrap = snapshots.bootstrap;
   const failed: InitializationFailureCheckpoint =
     latest?.checkpoint.phase === "initialization-failed"
       ? latest.checkpoint
@@ -282,7 +300,7 @@ export async function failTurnStep(input: {
           writeId: `${writeId}:entered`,
           writerRunId: getWorkflowMetadata().workflowRunId,
           phase: "initialization-failed",
-          deliveries: { [input.submission.eventId]: "retired" },
+          deliveries: Object.fromEntries(input.eventIds.map((id) => [id, "retired" as const])),
           queue: [],
           event: stampMessageStreamEvent(
             createSessionFailedEvent({
@@ -297,7 +315,6 @@ export async function failTurnStep(input: {
       ? latest.ref
       : await snapshots.commit(failed);
   if (failed.writeId !== `${writeId}:entered`) {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
     await closeSession(input.session, failed, storage);
     return receipt(enteringRef, failed, input.eventIds);
   }
@@ -305,11 +322,10 @@ export async function failTurnStep(input: {
   await notifyInitializationFailure({
     event: failed.event,
     serializedContext: {
-      ...input.submission.initial?.serializedContext,
+      ...bootstrap?.initial?.serializedContext,
       "eve.sessionId": input.session.sessionId,
     },
   });
-  await publishSessionDescriptor(input.session.holderRunId, input.session);
   const committed: InitializationFailureCheckpoint = { ...failed, writeId };
   const ref = await snapshots.commit(committed);
   await closeSession(input.session, committed, storage);

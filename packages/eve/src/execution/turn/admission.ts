@@ -30,13 +30,15 @@ export async function awaitTurnStep(runId: string): Promise<TurnReceipt> {
 
 export async function waitForTurnReceipt(runId: string): Promise<TurnReceipt> {
   const visited = new Set<string>();
+  let deliveries: TurnReceipt["deliveries"] = {};
   let next = runId;
   while (true) {
     if (visited.has(next) || visited.size >= 256)
       throw new Error("Invalid turn continuation chain.");
     visited.add(next);
     const receipt = await getRun<TurnReceipt>(next).returnValue;
-    if (receipt.continuedTo === undefined) return receipt;
+    deliveries = { ...deliveries, ...receipt.deliveries };
+    if (receipt.continuedTo === undefined) return { ...receipt, deliveries };
     next = receipt.continuedTo;
   }
 }

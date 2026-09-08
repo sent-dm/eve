@@ -22,7 +22,6 @@ const mocks = vi.hoisted(() => ({
   head: vi.fn(),
   read: vi.fn(),
   append: vi.fn(),
-  publish: vi.fn(),
   model: vi.fn(),
   runtime: vi.fn(),
   route: vi.fn(),
@@ -30,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   acknowledge: vi.fn(),
   acknowledgeTools: vi.fn(),
   create: vi.fn(),
+  resolveSession: vi.fn(),
 }));
 vi.mock("#compiled/@workflow/core/index.js", () => ({
   getStepMetadata: () => ({ stepId: "step" }),
@@ -40,7 +40,9 @@ vi.mock("#execution/session/snapshots.js", () => ({
     open: mocks.open,
   },
 }));
-vi.mock("#execution/session/directory.js", () => ({ publishSessionDescriptor: mocks.publish }));
+vi.mock("#execution/session/directory.js", () => ({
+  resolveSessionTarget: mocks.resolveSession,
+}));
 vi.mock("#execution/session/events.js", () => ({
   sessionEvents: {
     open: () => ({
@@ -77,6 +79,7 @@ let checkpoint: InitializedSessionCheckpoint;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.resolveSession.mockResolvedValue(session);
   const state = createDurableSessionState({
     session: {
       sessionId: session.sessionId,
@@ -142,15 +145,30 @@ beforeEach(() => {
 
 const run = (changes: Partial<Parameters<typeof executeTurnStep>[0]> = {}) =>
   executeTurnStep({
-    session,
+    sessionId: session.sessionId,
     owner,
     submission,
     work: { kind: "model" },
     abortSignal: new AbortController().signal,
     ...changes,
-  });
+  }).then((executed) => executed.result);
 
 describe("turn execution boundary", () => {
+  it("does not hydrate or fail the session when its resource descriptor is unavailable", async () => {
+    mocks.resolveSession.mockRejectedValueOnce(new Error("Descriptor not ready"));
+    await expect(run()).rejects.toMatchObject({ name: "SessionStorageUnavailableError" });
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.model).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing stored seed instead of initializing from candidate input", async () => {
+    mocks.head.mockReturnValue(undefined);
+    await expect(
+      run({ submission: { ...submission, eventId: "first", initial: { serializedContext: {} } } }),
+    ).rejects.toThrow("bootstrap submission is missing");
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
   it("starts attributes alongside the durable marker and joins both before model effects", async () => {
     const attributes = Promise.withResolvers<void>();
     const marker = Promise.withResolvers<void>();
@@ -189,19 +207,18 @@ describe("turn execution boundary", () => {
     expect(mocks.model).not.toHaveBeenCalled();
   });
 
-  it("publishes bootstrap readiness after its first durable checkpoint and before model effects", async () => {
-    mocks.head.mockReturnValue(undefined);
-    const result = await run({
-      submission: {
-        ...submission,
-        eventId: "first",
-        initial: { serializedContext: { "eve.bundle": { source: {} } }, sessionTimeoutMs: false },
-      },
+  it("hydrates the persisted bootstrap seed and commits before model effects", async () => {
+    const firstTurn: AcceptedSubmission = {
+      ...submission,
+      eventId: "first",
+      initial: { serializedContext: { "eve.bundle": { source: {} } }, sessionTimeoutMs: false },
+    };
+    mocks.head.mockReturnValue({
+      ref: { ...ref, index: 0 },
+      checkpoint: { phase: "seed", writeId: "first", submission: firstTurn },
     });
+    const result = await run({ submission: firstTurn });
     expect(mocks.append.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.publish.mock.invocationCallOrder[0]!,
-    );
-    expect(mocks.publish.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.model.mock.invocationCallOrder[0]!,
     );
     expect(result).toMatchObject({
@@ -278,7 +295,7 @@ describe("turn execution boundary", () => {
 
   it("does not turn a storage failure into an empty session", async () => {
     mocks.open.mockRejectedValueOnce(new Error("storage unavailable"));
-    await expect(run()).rejects.toThrow("storage unavailable");
+    await expect(run()).rejects.toMatchObject({ name: "SessionStorageUnavailableError" });
     expect(mocks.create).not.toHaveBeenCalled();
   });
 

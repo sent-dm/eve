@@ -10,11 +10,12 @@ import type { AcceptedSubmission } from "#execution/turn/types.js";
 
 export async function initializeHolderStep(
   runId: string,
-  eventId: string,
+  firstTurn: AcceptedSubmission,
 ): Promise<SessionResources> {
   "use step";
-  const resources = createSessionResources(runId, eventId);
-  await initializeSessionResources(resources);
+  const resources = createSessionResources(runId, firstTurn.eventId);
+  await initializeSessionResources(resources, firstTurn);
+  await publishSessionDescriptor(runId, resources);
   return resources;
 }
 
@@ -25,6 +26,6 @@ export async function redirectHolderStep(
 ): Promise<void> {
   "use step";
   const resources = await sessionDirectory.resolveHolder(ownerRunId);
-  await dispatchTurn(resources, submission);
+  await dispatchTurn({ sessionId: resources.sessionId, resources }, submission);
   await publishSessionDescriptor(runId, resources);
 }

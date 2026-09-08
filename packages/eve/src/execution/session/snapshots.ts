@@ -10,7 +10,7 @@ interface SnapshotWrite {
 }
 
 type SnapshotEntry<Checkpoint> =
-  | { readonly kind: "initialized"; readonly index: 0 }
+  | { readonly kind: "initialized"; readonly index: 0; readonly checkpoint?: Checkpoint }
   | { readonly kind: "record"; readonly index: number; readonly checkpoint: Checkpoint };
 
 export interface StoredSnapshot<Checkpoint> {
@@ -26,7 +26,7 @@ export interface SnapshotLog<Checkpoint> {
 }
 
 function validateRecordRef(ref: SnapshotRecordRef): void {
-  if (!Number.isSafeInteger(ref.index) || ref.index < 1) {
+  if (!Number.isSafeInteger(ref.index) || ref.index < 0) {
     throw new Error("Invalid session snapshot record index.");
   }
 }
@@ -48,20 +48,23 @@ function checkpointFromEntry<Checkpoint>(
   index: number,
 ): Checkpoint {
   validateEntry(entry);
-  if (entry.kind !== "record") throw new Error("Session snapshot record does not exist.");
+  if (entry.checkpoint === undefined) throw new Error("Session snapshot record does not exist.");
   if (entry.index !== index)
     throw new Error("Session snapshot record index does not match its reference.");
   return entry.checkpoint;
 }
 
 export const sessionSnapshots = {
-  async initialize(
+  async initialize<Checkpoint extends SnapshotWrite>(
     ref: SnapshotStreamRef,
     scope: StreamStorageScope = createStreamStorageScope(),
+    checkpoint?: Checkpoint,
   ): Promise<void> {
     const storage = scope.open(ref.id);
     if ((await storage.tailIndex()) === -1) {
-      await storage.append<SnapshotEntry<never>>([{ kind: "initialized", index: 0 }]);
+      await storage.append<SnapshotEntry<Checkpoint>>([
+        { kind: "initialized", index: 0, checkpoint },
+      ]);
     }
   },
 
@@ -74,7 +77,7 @@ export const sessionSnapshots = {
     validateEntry(head);
     let index = head.index;
     let latest: StoredSnapshot<Checkpoint> | undefined =
-      head.kind === "record"
+      head.checkpoint !== undefined
         ? { ref: { streamId: stream.id, index }, checkpoint: head.checkpoint }
         : undefined;
     let latestWriteId = latest?.checkpoint.writeId;

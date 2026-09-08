@@ -81,7 +81,7 @@ describe("holding workflow", () => {
     expect(hooks.get("provider-thread")!.getConflict.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.initialize.mock.invocationCallOrder[0]!,
     );
-    expect(mocks.initialize).toHaveBeenCalledExactlyOnceWith("holder", "first");
+    expect(mocks.initialize).toHaveBeenCalledExactlyOnceWith("holder", firstTurn);
     expect(mocks.start).toHaveBeenCalledExactlyOnceWith({ sessionId: "holder" }, firstTurn);
     expect(mocks.initialize.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.start.mock.invocationCallOrder[0]!,

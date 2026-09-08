@@ -18,10 +18,17 @@ vi.mock("#execution/session/dispatch.js", () => ({ dispatchTurn: mocks.dispatch 
 beforeEach(() => vi.clearAllMocks());
 
 describe("holder bootstrap", () => {
-  it("prepares storage without publishing readiness before the first turn writes state", async () => {
-    const resources = await initializeHolderStep("holder", "first");
-    expect(mocks.initialize).toHaveBeenCalledWith(resources);
-    expect(mocks.publish).not.toHaveBeenCalled();
+  it("persists the bootstrap seed before publishing resources", async () => {
+    const firstTurn: AcceptedSubmission = {
+      eventId: "first",
+      command: { kind: "send", payload: { message: "Hello" } },
+    };
+    const resources = await initializeHolderStep("holder", firstTurn);
+    expect(mocks.initialize).toHaveBeenCalledWith(resources, firstTurn);
+    expect(mocks.publish).toHaveBeenCalledWith("holder", resources);
+    expect(mocks.initialize.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.publish.mock.invocationCallOrder[0]!,
+    );
   });
   it("publishes canonical resources only after dispatching the losing creation's accepted input", async () => {
     const resources = createSessionResources("winner", "initial");
@@ -33,7 +40,10 @@ describe("holder bootstrap", () => {
     mocks.resolve.mockResolvedValue(resources);
     await redirectHolderStep("loser", "winner", submission);
     expect(mocks.resolve).toHaveBeenCalledWith("winner");
-    expect(mocks.dispatch).toHaveBeenCalledWith(resources, submission);
+    expect(mocks.dispatch).toHaveBeenCalledWith(
+      { sessionId: resources.sessionId, resources },
+      submission,
+    );
     expect(mocks.publish).toHaveBeenCalledWith("loser", resources);
     expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.publish.mock.invocationCallOrder[0]!,

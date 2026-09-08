@@ -4,7 +4,13 @@ import {
 } from "#execution/session/stream-storage.js";
 import type { SnapshotRecordRef, SnapshotStreamRef } from "#execution/session/resources.js";
 import { sessionSnapshots, type StoredSnapshot } from "#execution/session/snapshots.js";
-import type { SessionCheckpoint } from "#execution/turn/types.js";
+import type { AcceptedSubmission, SessionCheckpoint } from "#execution/turn/types.js";
+
+export interface SessionBootstrap {
+  readonly phase: "seed";
+  readonly writeId: string;
+  readonly submission: AcceptedSubmission;
+}
 
 export interface CheckpointAttempt {
   readonly phase: "entered";
@@ -13,7 +19,7 @@ export interface CheckpointAttempt {
   readonly source: { readonly ref: SnapshotRecordRef } | { readonly initial: SessionCheckpoint };
 }
 
-export type TurnCheckpointRecord = SessionCheckpoint | CheckpointAttempt;
+export type TurnCheckpointRecord = SessionCheckpoint | CheckpointAttempt | SessionBootstrap;
 
 /** Effects begin after a small durable marker; only commits copy the session state. */
 export async function openCheckpointLog(
@@ -26,22 +32,32 @@ export async function openCheckpointLog(
   ): Promise<StoredSnapshot<SessionCheckpoint> | undefined> => {
     const stored = ref === undefined ? log.latest : { ref, checkpoint: await log.read(ref) };
     if (stored === undefined) return undefined;
+    if (stored.checkpoint.phase === "seed") return undefined;
     if (stored.checkpoint.phase !== "entered")
       return { ref: stored.ref, checkpoint: stored.checkpoint };
     const source = stored.checkpoint.source;
     if ("initial" in source) return { ref: stored.ref, checkpoint: source.initial };
     const checkpoint = await log.read(source.ref);
-    if (checkpoint.phase === "entered")
+    if (checkpoint.phase === "entered" || checkpoint.phase === "seed")
       throw new Error("A checkpoint attempt must reference committed state.");
     return { ref: source.ref, checkpoint };
   };
   return {
+    get effectsOwnerRunId(): string | undefined {
+      const head = log.latest?.checkpoint;
+      return head?.phase === "entered" || head?.phase === "running" ? head.writerRunId : undefined;
+    },
+    get bootstrap(): AcceptedSubmission | undefined {
+      return log.latest?.checkpoint.phase === "seed" ? log.latest.checkpoint.submission : undefined;
+    },
     get hasUncommittedEffects(): boolean {
       return log.latest?.checkpoint.phase === "entered";
     },
     completed(writeId: string): StoredSnapshot<SessionCheckpoint> | undefined {
       const head = log.latest;
-      return head?.checkpoint.writeId === writeId && head.checkpoint.phase !== "entered"
+      return head?.checkpoint.writeId === writeId &&
+        head.checkpoint.phase !== "entered" &&
+        head.checkpoint.phase !== "seed"
         ? { ref: head.ref, checkpoint: head.checkpoint }
         : undefined;
     },

@@ -4,6 +4,7 @@ import {
   initializeSessionResources,
   publishSessionDescriptor,
   sessionDirectory,
+  resolveSessionTarget,
 } from "#execution/session/directory.js";
 import { sessionEvents } from "#execution/session/events.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
@@ -142,12 +143,31 @@ afterEach(() => {
 });
 
 describe("session directory", () => {
-  it("rejects a missing holder before opening a reader", async () => {
-    const failure = new Error("Holder not found");
-    runtime.getRun.mockReturnValueOnce({ status: Promise.reject(failure) });
+  it("propagates descriptor read failures without an existence preflight", async () => {
+    const failure = new Error("Descriptor unavailable");
+    runtime.getRun.mockReturnValueOnce({
+      getReadable: () => new ReadableStream({ start: (controller) => controller.error(failure) }),
+    });
     await expect(sessionDirectory.resolveHolder("missing")).rejects.toBe(failure);
     expect(reads).toBe(0);
     expect(streams.size).toBe(0);
+  });
+
+  it("rejects a redirected holder before accessing another session's snapshots", async () => {
+    const resources = createSessionResources("canonical", "first");
+    await publishSessionDescriptor("redirect", resources);
+    await expect(
+      resolveSessionTarget({ sessionId: "redirect" }, createStreamStorageScope()),
+    ).rejects.toThrow("do not match the claimed session");
+    expect(streams.has(resources.snapshots.id)).toBe(false);
+  });
+
+  it("uses supplied bootstrap resources without reading an unpublished descriptor", async () => {
+    const resources = createSessionResources("holder", "first");
+    expect(
+      await resolveSessionTarget({ sessionId: "holder", resources }, createStreamStorageScope()),
+    ).toBe(resources);
+    expect(runtime.getRun).not.toHaveBeenCalled();
   });
 
   it("resolves the canonical descriptor after duplicate holder bootstrap", async () => {
@@ -325,6 +345,20 @@ describe("session snapshots", () => {
     expect(cancellations).toBeGreaterThan(0);
   });
 
+  it("keeps the immutable seed at index zero when holder initialization retries after a turn", async () => {
+    const { snapshots } = createSessionResources("holder", "first");
+    const seed = { writeId: "first", message: "seed" };
+    await sessionSnapshots.initialize(snapshots, undefined, seed);
+    const log = await sessionSnapshots.open<typeof seed>(snapshots);
+    expect(log.latest).toEqual({ ref: { streamId: snapshots.id, index: 0 }, checkpoint: seed });
+    const committed = await log.append({ writeId: "turn", message: "settled" });
+    await sessionSnapshots.initialize(snapshots, undefined, seed);
+    const reopened = await sessionSnapshots.open<typeof seed>(snapshots);
+    expect(reopened.latest?.ref).toEqual(committed);
+    expect(await reopened.read({ streamId: snapshots.id, index: 0 })).toEqual(seed);
+    expect(stored(snapshots.id).chunks).toHaveLength(2);
+  });
+
   it.each([
     { kind: "initialized", index: 1 },
     { kind: "record", index: 0, checkpoint: { writeId: "invalid" } },
@@ -445,7 +479,9 @@ describe("session snapshots", () => {
     reads = tailReads = 0;
     expect(await log.read(first)).toEqual({ writeId: "first" });
     expect({ reads, tailReads }).toEqual({ reads: 1, tailReads: 0 });
-    await expect(log.read({ ...first, index: 0 })).rejects.toThrow("Invalid session snapshot");
+    await expect(log.read({ ...first, index: 0 })).rejects.toThrow(
+      "Session snapshot record does not exist",
+    );
     await expect(log.read({ ...first, index: 102 })).rejects.toThrow("outside this log");
     const other = createSessionResources("other", "first").snapshots;
     await expect(log.read({ ...first, streamId: other.id })).rejects.toThrow("outside this log");

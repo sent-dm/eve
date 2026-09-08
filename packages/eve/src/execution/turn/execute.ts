@@ -1,4 +1,7 @@
-import { createStreamStorageScope } from "#execution/session/stream-storage.js";
+import {
+  createStreamStorageScope,
+  type StreamStorageScope,
+} from "#execution/session/stream-storage.js";
 import { selectDeliveries } from "#execution/turn/receipts.js";
 import {
   commandDelivery,
@@ -10,8 +13,14 @@ import type { DeliverHookPayload, HookPayload } from "#channel/types.js";
 import type { InboxAddress } from "#execution/inbox/types.js";
 import { sessionEvents } from "#execution/session/events.js";
 import { openCheckpointLog } from "#execution/turn/checkpoint-log.js";
-import { publishSessionDescriptor } from "#execution/session/directory.js";
-import type { SessionResources, SnapshotRecordRef } from "#execution/session/resources.js";
+import { resolveSessionTarget } from "#execution/session/directory.js";
+import { interruptionKind } from "#execution/turn/reduce.js";
+import { SessionStorageUnavailableError } from "#execution/session/storage-error.js";
+import type {
+  SessionResources,
+  SessionTarget,
+  SnapshotRecordRef,
+} from "#execution/session/resources.js";
 import { replaceDurableSessionSnapshot } from "#execution/session/state.js";
 import { createSessionState } from "#execution/session/create-state.js";
 import { dispatchCoordination } from "#execution/turn/dispatch-coordination.js";
@@ -41,8 +50,7 @@ import { sessionCommandToken } from "#execution/session-command-token.js";
 import { DEFAULT_SESSION_TIMEOUT_MS } from "#execution/session-timeout.js";
 import { advanceStep } from "#harness/emission.js";
 
-export interface ExecuteTurnInput {
-  readonly session: SessionResources;
+export interface ExecuteTurnInput extends SessionTarget {
   readonly owner: InboxAddress;
   readonly submission: AcceptedSubmission;
   readonly checkpoint?: SnapshotRecordRef;
@@ -50,12 +58,36 @@ export interface ExecuteTurnInput {
   readonly abortSignal: AbortSignal;
 }
 
+interface ResolvedExecuteTurnInput extends ExecuteTurnInput {
+  readonly session: SessionResources;
+}
+
+export interface ExecutedTurn {
+  readonly session: SessionResources;
+  readonly result: TurnExecutionResult;
+}
+
 /** The only model boundary: hydrate, do work, commit, and return a small reference. */
-export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExecutionResult> {
+export async function executeTurnStep(input: ExecuteTurnInput): Promise<ExecutedTurn> {
   "use step";
-  const writeId = getStepMetadata().stepId;
   const storage = createStreamStorageScope();
-  const snapshots = await openCheckpointLog(input.session.snapshots, storage);
+  let session: SessionResources;
+  let snapshots: Awaited<ReturnType<typeof openCheckpointLog>>;
+  try {
+    session = await resolveSessionTarget(input, storage);
+    snapshots = await openCheckpointLog(session.snapshots, storage);
+  } catch (error) {
+    throw new SessionStorageUnavailableError(error);
+  }
+  return { session, result: await executeTurn({ ...input, session }, storage, snapshots) };
+}
+
+async function executeTurn(
+  input: ResolvedExecuteTurnInput,
+  storage: StreamStorageScope,
+  snapshots: Awaited<ReturnType<typeof openCheckpointLog>>,
+): Promise<TurnExecutionResult> {
+  const writeId = getStepMetadata().stepId;
   const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
     if (completed.checkpoint.phase === "initialization-failed")
@@ -64,7 +96,6 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     return { kind: "progress", progress: projectProgress(completed.ref, completed.checkpoint) };
   }
   if (snapshots.entered(writeId)) {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
     throw new Error("The previous execution attempt did not commit its effects.");
   }
   if (snapshots.hasUncommittedEffects) {
@@ -92,13 +123,44 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     throw new Error("The previous turn released ownership without settling its effects.");
   }
   if (checkpoint === undefined) {
-    if (
-      input.submission.eventId !== input.session.initialEventId ||
-      input.submission.initial === undefined
-    ) {
-      throw new Error("A session must be initialized by its first accepted submission.");
+    const firstTurn = snapshots.bootstrap;
+    if (firstTurn?.eventId !== input.session.initialEventId || firstTurn.initial === undefined)
+      throw new Error("The session bootstrap submission is missing.");
+    checkpoint = await initializeCheckpoint({ ...input, submission: firstTurn });
+    if (input.submission.eventId !== firstTurn.eventId) {
+      const interruption = interruptionKind(
+        input.submission,
+        `turn_${input.owner.ownerRunId}`,
+        checkpoint.caller?.taskId ?? firstTurn.initial.taskId,
+      );
+      if (interruption !== undefined || input.submission.command.kind === "session-timeout") {
+        checkpoint = {
+          ...checkpoint,
+          deliveries: {
+            [firstTurn.eventId]: "retired",
+            ...(interruption === "cancel"
+              ? { [input.submission.eventId]: "applied" as const }
+              : {}),
+          },
+          inputs:
+            interruption === "cancel" || interruption === "interrupt"
+              ? []
+              : [{ submission: input.submission, candidateRunId: input.owner.ownerRunId }],
+          queue:
+            interruption === "interrupt"
+              ? [{ submission: input.submission, candidateRunId: input.owner.ownerRunId }]
+              : [],
+          result:
+            interruption === "cancel" || interruption === "interrupt"
+              ? cancelledResult(checkpoint)
+              : undefined,
+        };
+      } else {
+        checkpoint = admitSubmissions(checkpoint, [
+          { submission: input.submission, candidateRunId: input.owner.ownerRunId },
+        ]);
+      }
     }
-    checkpoint = await initializeCheckpoint(input);
   } else if (input.checkpoint === undefined) {
     const head = checkpoint.queue[0];
     const urgent =
@@ -178,10 +240,6 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
       : undefined,
   ]);
   for (const result of entry) if (result.status === "rejected") throw result.reason;
-  if (input.submission.eventId === input.session.initialEventId) {
-    await publishSessionDescriptor(input.session.holderRunId, input.session);
-  }
-
   // Choosing another execution boundary admits the preceding model proposal.
   // Its rollback must not erase tools or child handles committed afterward.
   if (checkpoint.result !== undefined) {
@@ -530,7 +588,7 @@ function nextAction(
 }
 
 async function initializeCheckpoint(
-  input: ExecuteTurnInput,
+  input: ResolvedExecuteTurnInput,
 ): Promise<InitializedSessionCheckpoint> {
   const seed = input.submission.initial!;
   const serializedContext: Record<string, unknown> = {

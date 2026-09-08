@@ -1,6 +1,6 @@
 import type { HookPayload, RunInput, SessionCommand, TurnCaller } from "#channel/types.js";
 import type { DurableSessionState } from "#execution/session/state.js";
-import type { SessionResources, SnapshotRecordRef } from "#execution/session/resources.js";
+import type { SessionTarget, SnapshotRecordRef } from "#execution/session/resources.js";
 import type { ModelResult } from "#execution/turn/model-types.js";
 import type { InboxEnvelope } from "#execution/inbox/types.js";
 
@@ -25,10 +25,12 @@ export interface AcceptedSubmission {
   readonly initial?: InitialSessionSeed;
 }
 
-export interface TurnWorkflowInput {
-  readonly session: SessionResources;
+export interface TurnWorkflowInput extends SessionTarget {
   readonly submission: AcceptedSubmission;
-  readonly afterRunId?: string;
+  readonly predecessor?: {
+    readonly kind: "owner" | "submission";
+    readonly runId: string;
+  };
 }
 
 export type DeliveryDisposition = "applied" | "retired";

@@ -1,18 +1,18 @@
 import { start, type Run } from "#internal/workflow/runtime.js";
-import type { SessionResources } from "#execution/session/resources.js";
+import type { SessionResources, SessionTarget } from "#execution/session/resources.js";
 import type { AcceptedSubmission, TurnReceipt, TurnWorkflowInput } from "#execution/turn/types.js";
 
 import { turnWorkflowReference } from "#execution/workflow-references.js";
 
 export async function dispatchTurn(
-  session: SessionResources,
+  session: SessionTarget,
   submission: AcceptedSubmission,
-  afterRunId?: string,
+  predecessor?: TurnWorkflowInput["predecessor"],
 ): Promise<Run<TurnReceipt>> {
   const input: TurnWorkflowInput = {
-    session,
+    ...session,
     submission,
-    afterRunId,
+    predecessor,
   };
   const run =
     submission.acceptedDeploymentId === undefined
@@ -24,10 +24,16 @@ export async function dispatchTurn(
 }
 
 export async function deferTurnStep(
-  input: TurnWorkflowInput & { readonly afterRunId: string },
+  input: TurnWorkflowInput & {
+    readonly predecessor: NonNullable<TurnWorkflowInput["predecessor"]>;
+  },
 ): Promise<TurnReceipt> {
   "use step";
-  const run = await dispatchTurn(input.session, input.submission, input.afterRunId);
+  const run = await dispatchTurn(
+    { sessionId: input.sessionId, resources: input.resources },
+    input.submission,
+    input.predecessor,
+  );
   return { continuedTo: run.runId, deliveries: {}, terminal: false };
 }
 
@@ -36,6 +42,6 @@ export async function startTurnStep(
   submission: AcceptedSubmission,
 ): Promise<{ readonly runId: string }> {
   "use step";
-  const run = await dispatchTurn(session, submission);
+  const run = await dispatchTurn({ sessionId: session.sessionId, resources: session }, submission);
   return { runId: run.runId };
 }

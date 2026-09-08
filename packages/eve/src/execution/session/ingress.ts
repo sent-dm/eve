@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getHookByToken, type Run } from "#internal/workflow/runtime.js";
 import type { AcceptedSubmission, TurnReceipt } from "#execution/turn/types.js";
-import type { SessionResources } from "#execution/session/resources.js";
-import { sessionDirectory } from "#execution/session/directory.js";
+import type { SessionTarget } from "#execution/session/resources.js";
 import { dispatchTurn } from "#execution/session/dispatch.js";
 import { withWorkflowStartContext } from "#execution/workflow-start.js";
 import { readSessionIdFromCommandToken } from "#execution/session-command-token.js";
@@ -30,24 +29,23 @@ export function acceptSubmission(
   };
 }
 
-/** Dispatches an already-resolved submission without discovering mutable session state. */
+/** Accepts durable work without reading the holder or session state. */
 export async function dispatchAcceptedSubmission(
-  session: SessionResources,
+  session: SessionTarget,
   submission: AcceptedSubmission,
 ): Promise<DispatchedSubmission> {
   const run = await withWorkflowStartContext(() => dispatchTurn(session, submission));
   return { eventId: submission.eventId, sessionId: session.sessionId, run };
 }
 
-/** Resolves the immutable descriptor once, then starts a terminating turn candidate. */
+/** Starts an existing session's candidate immediately; the owner resolves its resources. */
 export async function dispatchSessionCommand(
   sessionId: string,
   command: AcceptedSubmission["command"],
   eventId?: string,
 ): Promise<DispatchedSubmission> {
   const submission = acceptSubmission(command, eventId);
-  const session = await sessionDirectory.resolveSession(sessionId);
-  return await dispatchAcceptedSubmission(session, submission);
+  return await dispatchAcceptedSubmission({ sessionId }, submission);
 }
 
 /** Continuation hooks are lookup addresses; accepted input is sent directly to a turn. */
@@ -60,6 +58,5 @@ export async function dispatchSessionCommandByToken(
   if (sessionId !== undefined) return await dispatchSessionCommand(sessionId, command, eventId);
   const submission = acceptSubmission(command, eventId);
   const hook = await getHookByToken(token);
-  const session = await sessionDirectory.resolveHolder(hook.runId);
-  return await dispatchAcceptedSubmission(session, submission);
+  return await dispatchAcceptedSubmission({ sessionId: hook.runId }, submission);
 }

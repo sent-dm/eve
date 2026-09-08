@@ -33,8 +33,9 @@ curl -X POST http://127.0.0.1:2000/eve/v1/session \
 ```
 
 eve responds with `202` and the durable `sessionId` in the JSON body and
-`x-eve-session-id` header after its streams and initial state are ready. The first turn
-is already accepted. Follow-ups can arrive immediately; the runtime admits them to
+`x-eve-session-id` header once session creation is durably accepted. Initialization
+continues in the background. Follow-ups can arrive immediately; the runtime preserves
+the initial message's position and admits follow-ups to
 the active turn or schedules a new turn according to their delivery policy.
 
 ## Stream a session
@@ -219,7 +220,7 @@ Clear removes model-message history in place, including static and dynamic user-
 
 Reset terminally retires the exact session ID and waits for settlement before responding. A reset ID never becomes a new session; create another session explicitly for a fresh conversation. It returns `"no_active_session"` if the session lookup fails or the reset candidate finds an already-terminal session.
 
-Compact and clear return `"accepted"` once their candidates are durably started; read the stream for their outcomes. If terminal settlement wins the race, the session retires those requests. They return `"no_active_session"` only when the session lookup fails.
+Compact and clear return `"accepted"` once their candidates are durably started; read the stream for their outcomes. Acceptance does not verify that the session exists. If terminal settlement wins the race, the session retires those requests.
 
 ## Reconnect and rewind
 

@@ -69,6 +69,13 @@ describe("ordinary turn storage budget", () => {
             return event.eventType === "hook_created" ? [replay] : [];
           });
           expect(hookCreations).toEqual([1, 1]);
+          let activation = 0;
+          const stepClaims = eventCreates.mock.calls.flatMap(([runId, event]) => {
+            if (runId !== candidate.run.runId) return [];
+            if (event.eventType === "run_started") activation++;
+            return event.eventType === "step_started" ? [activation] : [];
+          });
+          expect(stepClaims[0]).toBe(1);
           const calls = Object.fromEntries(
             spies.map((spy, index) => [
               methods[index]!,
@@ -84,7 +91,7 @@ describe("ordinary turn storage budget", () => {
           expect(events.filter((event) => event.type === "step.completed")).toHaveLength(1);
           expect(events.at(-1)?.type).toBe("session.waiting");
           expect(Object.values(calls).reduce((sum, count) => sum + count, 0)).toBeLessThanOrEqual(
-            12,
+            index === 0 ? 13 : 12,
           );
         }
         return samples;

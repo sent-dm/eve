@@ -65,6 +65,18 @@ beforeEach(() => {
 });
 
 describe("turn checkpoint log", () => {
+  it("exposes bootstrap input without treating it as initialized session state", async () => {
+    const submission = { eventId: "first", command: { kind: "cancel" as const } };
+    records.push({ phase: "seed", writeId: "first", submission });
+    const log = await openCheckpointLog(session.snapshots);
+    expect(log.bootstrap).toEqual(submission);
+    expect(await log.read()).toBeUndefined();
+    expect(log.completed("first")).toBeUndefined();
+    expect(log.hasUncommittedEffects).toBe(false);
+    await log.begin("initialize", pending);
+    expect(log.bootstrap).toBeUndefined();
+    expect(records[1]).toMatchObject({ source: { initial: pending } });
+  });
   it("represents empty bootstrap state without searching for a checkpoint", async () => {
     const log = await openCheckpointLog(session.snapshots);
     expect(await log.read()).toBeUndefined();

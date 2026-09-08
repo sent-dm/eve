@@ -27,7 +27,12 @@ vi.mock("#compiled/@workflow/core/index.js", () => ({
 }));
 vi.mock("#execution/inbox/owner.js", () => ({ createOwnerInbox: mocks.createOwnerInbox }));
 vi.mock("#execution/inbox/send.js", () => ({ sendInboxStep: mocks.sendInboxStep }));
-vi.mock("#execution/turn/execute.js", () => ({ executeTurnStep: mocks.executeTurnStep }));
+vi.mock("#execution/turn/execute.js", () => ({
+  executeTurnStep: async (...args: unknown[]) => ({
+    session: resources,
+    result: await mocks.executeTurnStep(...args),
+  }),
+}));
 vi.mock("#execution/turn/finalize.js", () => ({
   finalizeTurnStep: mocks.finalizeTurnStep,
   failTurnStep: mocks.failTurnStep,
@@ -42,12 +47,13 @@ vi.mock("#execution/await-run.js", () => ({
 }));
 import { turnWorkflow } from "#execution/turn/workflow.js";
 
+const resources = createSessionResources("session", "input");
 const input: TurnWorkflowInput = {
-  session: createSessionResources("session", "input"),
+  sessionId: resources.sessionId,
   submission: { eventId: "input", command: { kind: "send", payload: { message: "hello" } } },
 };
 const receipt: TurnReceipt = { deliveries: { input: "applied" }, terminal: false };
-const checkpoint: SnapshotRecordRef = { streamId: input.session.snapshots.id, index: 1 };
+const checkpoint: SnapshotRecordRef = { streamId: resources.snapshots.id, index: 1 };
 function progress(overrides: Partial<TurnProgress> = {}): TurnExecutionResult {
   return {
     kind: "progress",
@@ -153,6 +159,90 @@ describe("turn workflow ownership", () => {
     expect(mocks.failTurnStep).not.toHaveBeenCalled();
   });
 
+  it("delegates exhausted storage errors to durable ownership inspection", async () => {
+    const { inbox } = testInbox();
+    mocks.createOwnerInbox.mockReturnValue(inbox);
+    mocks.executeTurnStep.mockRejectedValue(
+      Object.assign(new Error("Session storage is unavailable"), {
+        name: "SessionStorageUnavailableError",
+      }),
+    );
+    await turnWorkflow(input);
+    expect(mocks.failTurnStep).toHaveBeenCalledWith(
+      expect.objectContaining({ failure: { kind: "storage", error: expect.any(Error) } }),
+    );
+    expect(inbox.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("defers its unaccounted input behind native owner completion and preserves seed deliveries", async () => {
+    const { inbox } = testInbox();
+    mocks.createOwnerInbox.mockReturnValue(inbox);
+    mocks.executeTurnStep.mockResolvedValue(progress());
+    mocks.finalizeTurnStep.mockResolvedValue({ deliveries: { seed: "applied" }, terminal: false });
+    mocks.deferTurnStep.mockImplementation(async () => {
+      expect(inbox.dispose).not.toHaveBeenCalled();
+      return { deliveries: {}, terminal: false, continuedTo: "successor" };
+    });
+    await expect(turnWorkflow(input)).resolves.toEqual({
+      deliveries: { seed: "applied" },
+      terminal: false,
+      continuedTo: "successor",
+    });
+    expect(mocks.deferTurnStep).toHaveBeenCalledWith({
+      ...input,
+      resources,
+      predecessor: { kind: "owner", runId: "candidate" },
+    });
+    expect(mocks.failTurnStep).not.toHaveBeenCalled();
+  });
+
+  it("awaits exact owner completion without following a continuation to itself", async () => {
+    const previous = deferred<void>();
+    mocks.awaitRunStep.mockReturnValueOnce(previous.promise);
+    mocks.createOwnerInbox.mockReturnValue(testInbox().inbox);
+    mocks.executeTurnStep.mockResolvedValue({ kind: "receipt", receipt });
+    const run = turnWorkflow({ ...input, predecessor: { kind: "owner", runId: "previous" } });
+    await flush();
+    expect(mocks.createOwnerInbox).not.toHaveBeenCalled();
+    previous.resolve();
+    await expect(run).resolves.toEqual(receipt);
+    expect(mocks.awaitRunStep).toHaveBeenCalledExactlyOnceWith("previous");
+    expect(mocks.awaitTurnStep).not.toHaveBeenCalled();
+  });
+
+  it.each(["seed-task", "winner-task"])(
+    "waits for accurate bootstrap task identity before applying %s cancellation",
+    async (taskId) => {
+      const actor = testInbox();
+      const model = deferred<TurnExecutionResult>();
+      mocks.createOwnerInbox.mockReturnValue(actor.inbox);
+      mocks.executeTurnStep
+        .mockReturnValueOnce(model.promise)
+        .mockResolvedValue(progress({ taskId: "seed-task" }));
+      const run = turnWorkflow({
+        ...input,
+        submission: {
+          ...input.submission,
+          command: {
+            kind: "send",
+            payload: { message: "next" },
+            caller: { callId: "winner", taskId: "winner-task" } as never,
+          },
+        },
+      });
+      await flush();
+      actor.push(submit({ kind: "cancel", taskId }));
+      const signal = mocks.executeTurnStep.mock.calls[0]![0].abortSignal as AbortSignal;
+      expect(signal.aborted).toBe(false);
+      model.resolve(progress({ taskId: "seed-task" }));
+      await run;
+      expect(signal.aborted).toBe(taskId === "seed-task");
+      expect(mocks.finalizeTurnStep).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: taskId === "seed-task" ? "cancel" : "natural" }),
+      );
+    },
+  );
+
   it("stops its observer when the first execution fails", async () => {
     const { inbox, stop } = testInbox();
     mocks.createOwnerInbox.mockReturnValue(inbox);
@@ -161,7 +251,9 @@ describe("turn workflow ownership", () => {
     expect(stop).toHaveBeenCalledOnce();
     expect(inbox.dispose).toHaveBeenCalledOnce();
     expect(mocks.failTurnStep).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "model failed" }),
+      expect.objectContaining({
+        failure: { kind: "execution", error: expect.objectContaining({ message: "model failed" }) },
+      }),
     );
     expect(mocks.executeTurnStep.mock.calls[0]![0].abortSignal.aborted).toBe(true);
   });
@@ -190,7 +282,11 @@ describe("turn workflow ownership", () => {
       throw new Error("start failed");
     });
     await expect(turnWorkflow(input)).rejects.toThrow("start failed");
-    expect(mocks.deferTurnStep).toHaveBeenCalledWith({ ...input, afterRunId: "earlier" });
+    expect(mocks.deferTurnStep).toHaveBeenCalledWith({
+      ...input,
+      resources,
+      predecessor: { kind: "submission", runId: "earlier" },
+    });
     expect(mocks.failTurnStep).not.toHaveBeenCalled();
     expect(inbox.dispose).toHaveBeenCalledOnce();
   });
@@ -248,7 +344,10 @@ describe("turn workflow ownership", () => {
         continuedTo: "deferred-behind-candidate",
       });
       mocks.executeTurnStep.mockResolvedValue({ kind: "receipt", receipt });
-      const result = turnWorkflow({ ...input, afterRunId: "previous" });
+      const result = turnWorkflow({
+        ...input,
+        predecessor: { kind: "submission", runId: "previous" },
+      });
       await flush();
       expect(controllers).toHaveLength(0);
       previous.resolve();
@@ -297,7 +396,12 @@ describe("turn workflow ownership", () => {
     model.resolve(progress());
     await run;
     expect(mocks.failTurnStep).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "reader failed" }),
+      expect.objectContaining({
+        failure: {
+          kind: "execution",
+          error: expect.objectContaining({ message: "reader failed" }),
+        },
+      }),
     );
     expect(actor.stop).toHaveBeenCalledOnce();
   });
@@ -359,7 +463,7 @@ describe("turn workflow ownership", () => {
     mocks.executeTurnStep.mockResolvedValue(progress({ continuationToken: "channel-token" }));
     await turnWorkflow(input);
     expect(mocks.sendInboxStep).toHaveBeenCalledWith(
-      input.session.control,
+      resources.control,
       expect.objectContaining({
         eventId: "candidate:rekey:channel-token",
         requestId: "candidate:rekey:channel-token",
@@ -394,7 +498,12 @@ describe("turn workflow ownership", () => {
     );
     await turnWorkflow(input);
     expect(mocks.failTurnStep).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "executor failed" }),
+      expect.objectContaining({
+        failure: {
+          kind: "execution",
+          error: expect.objectContaining({ message: "executor failed" }),
+        },
+      }),
     );
     expect(mocks.awaitRunStep).toHaveBeenCalledOnce();
   });
@@ -448,7 +557,12 @@ describe("turn workflow ownership", () => {
     model.resolve(progress());
     await run;
     expect(mocks.failTurnStep).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "executor failed during model" }),
+      expect.objectContaining({
+        failure: {
+          kind: "execution",
+          error: expect.objectContaining({ message: "executor failed during model" }),
+        },
+      }),
     );
   });
 });

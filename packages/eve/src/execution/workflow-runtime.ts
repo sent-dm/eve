@@ -49,6 +49,7 @@ import { buildRunContext } from "#execution/runtime-context.js";
 import { resolveEffectiveAgentRuntime } from "#execution/effective-agent-config.js";
 import type { HoldingWorkflowInput } from "#execution/session/holding-workflow.js";
 import { sessionDirectory } from "#execution/session/directory.js";
+import { createSessionResources } from "#execution/session/resources.js";
 import { sessionEvents } from "#execution/session/events.js";
 import { waitForTurnReceipt } from "#execution/turn/admission.js";
 import { sessionCallbackToTurnCaller } from "#channel/session.js";
@@ -67,8 +68,7 @@ const DEFAULT_ACTIVITY_COLLECTOR_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const log = createLogger("execution.workflow-runtime");
 
 /**
- * Creates a runtime that resolves immutable session resources at ingress
- * and dispatches independent turns with small, accepted submissions.
+ * Dispatches independent turns with small, accepted submissions.
  */
 export function createWorkflowRuntime(config: {
   readonly compiledArtifactsSource: RuntimeCompiledArtifactsSource;
@@ -197,7 +197,12 @@ export function createWorkflowRuntime(config: {
         throw error;
       }
 
-      const session = await sessionDirectory.resolveHolder(run.runId);
+      // Without an initial alias, this holder cannot redirect to another session.
+      // Return its allocated stream address while durable bootstrap proceeds.
+      const session =
+        workflowInput.initialToken === undefined
+          ? createSessionResources(run.runId, workflowInput.firstTurn.eventId)
+          : await sessionDirectory.resolveHolder(run.runId);
       let events: ReadableStream<MessageStreamEvent> | undefined;
       return {
         get events() {
@@ -242,8 +247,7 @@ export function createWorkflowRuntime(config: {
     ): Promise<{ sessionId: string } | undefined> {
       try {
         const hook = await getHookByToken(continuationToken);
-        const session = await sessionDirectory.resolveHolder(hook.runId);
-        return { sessionId: session.sessionId };
+        return { sessionId: hook.runId };
       } catch (error) {
         if (HookNotFoundError.is(error)) {
           return undefined;

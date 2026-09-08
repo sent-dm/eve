@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { cancellationSettlement } from "#execution/turn/cancel.js";
-import { createDurableSessionState } from "#execution/session/state.js";
+import {
+  createDurableSessionState,
+  replaceDurableSessionSnapshot,
+} from "#execution/session/state.js";
 
 const state = createDurableSessionState({
   session: {
@@ -22,6 +25,20 @@ const state = createDurableSessionState({
 });
 
 describe("cancellation settlement", () => {
+  it.each(["cancel", "interrupt", "terminal"] as const)(
+    "does not invent a turn when %s retires an unstarted bootstrap input",
+    (kind) => {
+      const unstarted = replaceDurableSessionSnapshot({
+        session: { ...state.snapshot.session, state: {} },
+      });
+      expect(unstarted.emissionState).toMatchObject({ sessionStarted: false, turnId: "" });
+      expect(cancellationSettlement(unstarted, kind)).toEqual({
+        events: [],
+        emissionAfter: unstarted.emissionState,
+      });
+    },
+  );
+
   it("replaces a turn without emitting a waiting boundary", () => {
     const proposal = cancellationSettlement(state, "interrupt");
     expect(proposal.events.map((event) => event.type)).toEqual(["turn.interrupted"]);

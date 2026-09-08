@@ -15,6 +15,7 @@ import {
   ContinuationTokenKey,
   DynamicSubagentAgentConfigKey,
   ModeKey,
+  SandboxKey,
   SessionCallbackKey,
   SessionDynamicSubagentRuntimeRevisionKey,
   SessionDynamicModelReferenceKey,
@@ -1251,6 +1252,62 @@ describe("runModel", () => {
       expect.objectContaining({ body: expect.stringContaining('"kind":"blocker.started"') }),
     );
   });
+
+  it.each([false, true])(
+    "preserves file input and the current sandbox in cancellation state (cancelled=%s)",
+    async (cancelled) => {
+      const adapter: ChannelAdapter = { kind: "file-test" };
+      mockSessionReads([createStubSession()]);
+      vi.mocked(getCompiledRuntimeAgentBundle).mockResolvedValue({
+        adapterRegistry: {
+          adaptersByKind: new Map([[adapter.kind, adapter]]),
+        },
+        compiledArtifactsSource: {},
+        graph: {
+          nodesByNodeId: new Map(),
+          root: { sandboxRegistry: { sandbox: null }, turnAgent: TestTurnAgent },
+        },
+        moduleMap: { nodes: {} },
+        hookRegistry: createEmptyHookRegistry(),
+        resolvedAgent: { config: {} },
+        subagentRegistry: {},
+        toolRegistry: {},
+        turnAgent: TestTurnAgent,
+      } as never);
+      const sandboxState = {
+        initialized: true,
+        session: { backendName: "test-memory", metadata: {}, sessionKey: "image-session" },
+      };
+      const get = vi.fn(async () => null);
+      const captureState = vi.fn(async () => sandboxState);
+      vi.mocked(createExecutionNodeStep).mockImplementation(() => async (session) => {
+        loadContext().setVirtualContext(SandboxKey, { captureState, get, stop: async () => {} });
+        if (cancelled) throw new TurnCancelledError();
+        return { next: null, session };
+      });
+      const message = [
+        { type: "file" as const, mediaType: "image/png", data: new Uint8Array([1, 2]) },
+      ];
+      const result = await runModel({
+        input: { kind: "deliver", payloads: [{ message }] },
+        events: createTestWritable(),
+        serializedContext: {
+          ...createSerializedContext(),
+          [ChannelKey.name]: { kind: adapter.kind, state: {} },
+        },
+        sessionState: createStubSessionState(),
+      });
+      const retained =
+        result.action === "cancelled" ? result.sessionState : result.cancellationState;
+      expect(result.action).toBe(cancelled ? "cancelled" : "park");
+      expect(retained?.snapshot.session).toMatchObject({
+        sandboxState,
+        history: [{ role: "user", content: message }],
+      });
+      expect(get).toHaveBeenCalledOnce();
+      expect(captureState).toHaveBeenCalledOnce();
+    },
+  );
 
   it("keeps a session-scoped dynamic model selection when the first turn is cancelled", async () => {
     const session = createStubSession();

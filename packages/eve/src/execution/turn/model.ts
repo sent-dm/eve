@@ -19,6 +19,7 @@ import {
   CapabilitiesKey,
   HandleEventKey,
   ModeKey,
+  SandboxKey,
   SessionDynamicSubagentRuntimeRevisionKey,
   SessionDynamicToolRuntimeRevisionKey,
   TurnTaskDeliveryKey,
@@ -479,10 +480,16 @@ export async function runModel(rawInput: ModelInput): Promise<ModelResult> {
       // again after this cancellation settles.
       const interrupted = serializeContext(ctx);
       const retained = readRetainedBackgroundToolResult(ctx);
-      const cancelledSession = await preserveCancelledTurnMessage(
-        retained?.backgroundTaskSession ?? initialSession,
-        resolved,
-      );
+      const cancelledSession = await contextStorage.run(ctx, async () => {
+        const preserved = await preserveCancelledTurnMessage(
+          retained?.backgroundTaskSession ?? initialSession,
+          resolved,
+        );
+        const sandbox = ctx.get(SandboxKey);
+        return sandbox === undefined
+          ? preserved
+          : { ...preserved, sandboxState: await sandbox.captureState() };
+      });
       return {
         action: "cancelled",
         backgroundTasks: retained?.backgroundTasks,
@@ -499,9 +506,14 @@ export async function runModel(rawInput: ModelInput): Promise<ModelResult> {
     const nextState = createDurableSessionState({ session: stepResult.session });
     const retained = readRetainedBackgroundToolResult(ctx);
     const cancellationState = createDurableSessionState({
-      session: await preserveCancelledTurnMessage(
-        retained?.backgroundTaskSession ?? initialSession,
-        resolved,
+      session: await contextStorage.run(ctx, () =>
+        preserveCancelledTurnMessage(
+          {
+            ...(retained?.backgroundTaskSession ?? initialSession),
+            sandboxState: stepResult.session.sandboxState,
+          },
+          resolved,
+        ),
       ),
     });
     const transition = {

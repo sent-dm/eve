@@ -100,8 +100,8 @@ export function retireTaskSubmissions(
   const matchesTurn =
     command.turnId === undefined || (checkpoint.phase === "running" && command.turnId === turnId);
   const pending = [...checkpoint.queue, ...(checkpoint.inputs ?? [])];
-  // A mixed message/answer keeps one candidate identity after splitting.
-  const cancelledCandidates = new Set(
+  // One candidate can admit the bootstrap input and its own independent input.
+  const cancelledInputs = new Set(
     matchesTurn
       ? pending
           .filter(
@@ -109,20 +109,20 @@ export function retireTaskSubmissions(
               item.submission.command.kind === "send" &&
               item.submission.command.caller?.taskId === command.taskId,
           )
-          .map((item) => item.candidateRunId)
+          .flatMap((item) => [item.submission.eventId, `${item.submission.eventId}:response`])
       : [],
   );
   const deliveries = { ...checkpoint.deliveries };
   const retain = (item: PendingSubmission): boolean => {
     if (item.submission.eventId === submission.eventId) return false;
-    if (!cancelledCandidates.has(item.candidateRunId)) return true;
+    if (!cancelledInputs.has(item.submission.eventId)) return true;
     deliveries[item.submission.eventId] = "retired";
     return false;
   };
   const queue = checkpoint.queue.filter(retain);
   const inputs = checkpoint.inputs?.filter(retain);
   deliveries[submission.eventId] =
-    cancelledCandidates.size > 0 || (matchesTurn && checkpoint.caller?.taskId === command.taskId)
+    cancelledInputs.size > 0 || (matchesTurn && checkpoint.caller?.taskId === command.taskId)
       ? "applied"
       : "retired";
   return { ...checkpoint, queue, inputs, deliveries };

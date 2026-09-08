@@ -31,6 +31,7 @@ export function cancellationSettlement(
   kind: "cancel" | "interrupt" | "terminal",
 ): ModelSettlement {
   const emission = state.emissionState;
+  if (emission.turnId.length === 0) return { events: [], emissionAfter: emission };
   const identity = { sequence: emission.sequence, turnId: activeTurnId(emission) };
   return {
     events: [

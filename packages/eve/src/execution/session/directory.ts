@@ -1,12 +1,16 @@
 import { isDeepStrictEqual } from "node:util";
 import { getRun, getWorld } from "#internal/workflow/runtime.js";
-import type { SessionResources } from "#execution/session/resources.js";
+import type { SessionResources, SessionTarget } from "#execution/session/resources.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
+import type { SessionBootstrap } from "#execution/turn/checkpoint-log.js";
+import type { AcceptedSubmission } from "#execution/turn/types.js";
 import { encodeStreamLocation } from "#execution/session/stream-location.js";
 import {
   appendStreamRecords,
+  createStreamStorageScope,
   readStreamRecord,
   streamTailIndex,
+  type StreamStorageScope,
 } from "#execution/session/stream-storage.js";
 
 const DESCRIPTOR_CACHE_LIMIT = 256;
@@ -30,13 +34,27 @@ export async function publishSessionDescriptor(
   await appendStreamRecords(stream, [resources], true);
 }
 
-export async function initializeSessionResources(resources: SessionResources): Promise<void> {
-  await sessionSnapshots.initialize(resources.snapshots);
+export async function initializeSessionResources(
+  resources: SessionResources,
+  firstTurn?: AcceptedSubmission,
+): Promise<void> {
+  const bootstrap: SessionBootstrap | undefined =
+    firstTurn === undefined
+      ? undefined
+      : {
+          phase: "seed",
+          writeId: firstTurn.eventId,
+          submission: firstTurn,
+        };
+  await sessionSnapshots.initialize(resources.snapshots, undefined, bootstrap);
   // The existing run owns its empty default stream. The first event materializes
   // its contents; readers can wait on that stable address before any write.
 }
 
-async function resolveHolder(holderRunId: string): Promise<SessionResources> {
+async function resolveHolder(
+  holderRunId: string,
+  storage: StreamStorageScope = createStreamStorageScope(),
+): Promise<SessionResources> {
   const scope = await getWorld();
   let cache = caches.get(scope);
   if (cache === undefined) {
@@ -45,15 +63,20 @@ async function resolveHolder(holderRunId: string): Promise<SessionResources> {
   }
   const cached = cache.get(holderRunId);
   if (cached !== undefined) return cached;
-  // A stream reader can wait on an address whose owner never existed. Validate
-  // cold lookups before waiting for bootstrap to publish the descriptor.
-  const pending = getRun(holderRunId).status.then(async () => {
-    const resources = await readStreamRecord<SessionResources>(descriptorStream(holderRunId));
-    Object.freeze(resources.events);
-    Object.freeze(resources.snapshots);
-    Object.freeze(resources.control);
-    return Object.freeze(resources);
-  });
+  const pending = storage
+    .open(descriptorStream(holderRunId))
+    .readRecord<SessionResources>()
+    .then((resources) => {
+      Object.freeze(resources.events);
+      Object.freeze(resources.snapshots);
+      Object.freeze(resources.control);
+      return Object.freeze(resources);
+    })
+    .catch(async (error) => {
+      // Missing streams may wait before the SDK exposes a missing owner's metadata.
+      await getRun(holderRunId).status;
+      throw error;
+    });
   cache.set(holderRunId, pending);
   if (cache.size > DESCRIPTOR_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
   try {
@@ -62,6 +85,17 @@ async function resolveHolder(holderRunId: string): Promise<SessionResources> {
     if (cache.get(holderRunId) === pending) cache.delete(holderRunId);
     throw error;
   }
+}
+
+/** Resources may redirect creation, but an owning candidate must keep its claimed identity. */
+export async function resolveSessionTarget(
+  target: SessionTarget,
+  storage: StreamStorageScope,
+): Promise<SessionResources> {
+  const resources = target.resources ?? (await resolveHolder(target.sessionId, storage));
+  if (resources.sessionId !== target.sessionId)
+    throw new Error("Session resources do not match the claimed session.");
+  return resources;
 }
 
 export const sessionDirectory = {

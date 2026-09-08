@@ -41,7 +41,7 @@ export async function holdingWorkflow(input: HoldingWorkflowInput): Promise<void
       aliases.set(input.initialToken, hook);
     }
 
-    const session = await initializeHolderStep(workflowRunId, input.firstTurn.eventId);
+    const session = await initializeHolderStep(workflowRunId, input.firstTurn);
     await startTurnStep(session, input.firstTurn);
 
     while (true) {

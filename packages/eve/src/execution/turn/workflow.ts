@@ -14,15 +14,22 @@ import {
 } from "#execution/turn/reduce.js";
 import type { TurnExecutionResult, TurnReceipt, TurnWorkflowInput } from "#execution/turn/types.js";
 import { TurnCancelledError } from "#harness/turn-cancellation.js";
-import type { SnapshotRecordRef } from "#execution/session/resources.js";
+import type { SessionResources, SnapshotRecordRef } from "#execution/session/resources.js";
 import { deferTurnStep } from "#execution/session/dispatch.js";
+import { isSessionStorageUnavailable } from "#execution/session/storage-error.js";
+
+interface OwnedTurnState {
+  resources?: SessionResources;
+  checkpoint?: SnapshotRecordRef;
+}
 
 export async function turnWorkflow(input: TurnWorkflowInput): Promise<TurnReceipt> {
   "use workflow";
   const runId = getWorkflowMetadata().workflowRunId;
-  const token = activeTurnToken(input.session.sessionId);
-  let checkpoint: SnapshotRecordRef | undefined;
-  if (input.afterRunId !== undefined) await awaitTurnStep(input.afterRunId);
+  const token = activeTurnToken(input.sessionId);
+  const state: OwnedTurnState = { resources: input.resources };
+  if (input.predecessor?.kind === "owner") await awaitRunStep(input.predecessor.runId);
+  else if (input.predecessor?.kind === "submission") await awaitTurnStep(input.predecessor.runId);
   // Register cancellation alongside ownership to share the durable hook-creation phase.
   const controller = new AbortController();
   while (true) {
@@ -33,21 +40,34 @@ export async function turnWorkflow(input: TurnWorkflowInput): Promise<TurnReceip
         const eventIds = new Set([input.submission.eventId]);
         let result: Exclude<TurnExecutionResult, { kind: "progress" }>;
         try {
-          result = await executeClaimedTurn(input, inbox, controller, eventIds, (ref) => {
-            checkpoint = ref;
-          });
+          result = await executeClaimedTurn(input, inbox, controller, eventIds, state);
         } catch (error) {
           return await failTurnStep({
-            session: input.session,
-            submission: input.submission,
+            sessionId: input.sessionId,
+            resources: state.resources,
             eventIds: [...eventIds],
-            checkpoint,
-            error: error instanceof Error ? error.message : String(error),
+            checkpoint: state.checkpoint,
+            failure: { kind: isSessionStorageUnavailable(error) ? "storage" : "execution", error },
           });
         }
         // A deferral failure belongs to this candidate, not to the settled session.
         if (result.kind === "wait")
-          return await deferTurnStep({ ...input, afterRunId: result.runId });
+          return await deferTurnStep({
+            ...input,
+            resources: state.resources,
+            predecessor: { kind: "submission", runId: result.runId },
+          });
+        if (
+          !result.receipt.terminal &&
+          result.receipt.deliveries[input.submission.eventId] === undefined
+        ) {
+          const successor = await deferTurnStep({
+            ...input,
+            resources: state.resources,
+            predecessor: { kind: "owner", runId },
+          });
+          return { ...result.receipt, continuedTo: successor.continuedTo };
+        }
         return result.receipt;
       }
     } finally {
@@ -68,13 +88,11 @@ async function executeClaimedTurn(
   inbox: OwnerInbox,
   controller: AbortController,
   eventIds: Set<string>,
-  observeCheckpoint: (ref: SnapshotRecordRef) => void,
+  state: OwnedTurnState,
 ): Promise<Exclude<TurnExecutionResult, { kind: "progress" }>> {
   let turnId = `turn_${inbox.address.ownerRunId}`;
-  let taskId =
-    input.submission.command.kind === "send"
-      ? (input.submission.command.caller?.taskId ?? input.submission.initial?.taskId)
-      : input.submission.initial?.taskId;
+  let taskId: string | undefined;
+  let taskKnown = false;
   let ownerFailure: { error: unknown } | undefined;
   let expired = input.submission.command.kind === "session-timeout";
   let active = true;
@@ -87,7 +105,13 @@ async function executeClaimedTurn(
     const submission = submissionFromEnvelope(envelope);
     if (submission !== undefined) eventIds.add(submission.eventId);
     if (submission?.command.kind === "session-timeout") expired = true;
-    if (submission !== undefined && interruptionKind(submission, turnId, taskId) !== undefined) {
+    const targeted =
+      submission?.command.kind === "cancel" && submission.command.taskId !== undefined;
+    if (
+      submission !== undefined &&
+      (!targeted || taskKnown) &&
+      interruptionKind(submission, turnId, taskId) !== undefined
+    ) {
       controller.abort(new TurnCancelledError());
     }
   };
@@ -131,46 +155,53 @@ async function executeClaimedTurn(
       );
     }
   };
-  const claimAlias = async (token: string | undefined): Promise<void> => {
-    if (token === undefined || token === "" || aliases.has(token)) return;
-    const requestId = `${inbox.address.ownerRunId}:rekey:${token}`;
-    const response = inbox.response(requestId).then(
-      (reply) => ({ kind: "reply" as const, reply }),
-      (error) => ({ kind: "error" as const, error }),
-    );
-    const sent = await sendInboxStep(input.session.control, {
-      eventId: requestId,
-      requestId,
-      kind: "rekey",
-      payload: { token, replyTo: inbox.address },
-    });
-    if (sent !== "delivered") throw new Error("Session holder is unavailable.");
-    const received = await response;
-    if (received.kind === "error") throw received.error;
-    if ((received.reply.payload as { status: string }).status !== "claimed")
-      throw new Error("Session continuation address could not be claimed.");
-    aliases.add(token);
-  };
   try {
     pending.push(...inbox.drain());
     pending.forEach(observeEnvelope);
-    let result = await executeTurnStep({
+    const executed = await executeTurnStep({
       ...input,
+      resources: state.resources,
       owner: inbox.address,
       work: { kind: "model" },
       abortSignal: controller.signal,
     });
+    const session = executed.session;
+    state.resources = session;
+    eventIds.add(session.initialEventId);
+    let result = executed.result;
+    const claimAlias = async (token: string | undefined): Promise<void> => {
+      if (token === undefined || token === "" || aliases.has(token)) return;
+      const requestId = `${inbox.address.ownerRunId}:rekey:${token}`;
+      const response = inbox.response(requestId).then(
+        (reply) => ({ kind: "reply" as const, reply }),
+        (error) => ({ kind: "error" as const, error }),
+      );
+      const sent = await sendInboxStep(session.control, {
+        eventId: requestId,
+        requestId,
+        kind: "rekey",
+        payload: { token, replyTo: inbox.address },
+      });
+      if (sent !== "delivered") throw new Error("Session holder is unavailable.");
+      const received = await response;
+      if (received.kind === "error") throw received.error;
+      if ((received.reply.payload as { status: string }).status !== "claimed")
+        throw new Error("Session continuation address could not be claimed.");
+      aliases.add(token);
+    };
     throwIfOwnerFailed();
     while (result.kind === "progress") {
       const progress = result.progress;
       turnId = progress.turnId;
       taskId = progress.taskId;
-      observeCheckpoint(progress.checkpoint);
+      taskKnown = true;
+      state.checkpoint = progress.checkpoint;
       if (progress.claimedContinuationToken !== undefined)
         aliases.add(progress.claimedContinuationToken);
       await claimAlias(progress.continuationToken);
       watchExecutors(progress.pendingRunIds ?? []);
       pending.push(...inbox.drain());
+      pending.forEach(observeEnvelope);
       if (
         progress.sleepDurationMs !== undefined &&
         !controller.signal.aborted &&
@@ -190,7 +221,7 @@ async function executeClaimedTurn(
       if (decision.kind === "finalize") {
         const initialKind = interruptionKind(input.submission, turnId, taskId);
         const receipt = await finalizeTurnStep({
-          session: input.session,
+          session,
           checkpoint: progress.checkpoint,
           eventIds: [...eventIds],
           claimedContinuationToken: progress.continuationToken || undefined,
@@ -212,8 +243,9 @@ async function executeClaimedTurn(
       }
       const envelopes = pending;
       pending = [];
-      result = await executeTurnStep({
+      const executed = await executeTurnStep({
         ...input,
+        resources: session,
         owner: inbox.address,
         checkpoint: progress.checkpoint,
         work:
@@ -224,6 +256,7 @@ async function executeClaimedTurn(
               : { kind: "dispatch" },
         abortSignal: controller.signal,
       });
+      result = executed.result;
       throwIfOwnerFailed();
       if (decision.kind === "dispatch") pending.push(...envelopes);
     }

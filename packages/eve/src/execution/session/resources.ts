@@ -30,6 +30,12 @@ export interface SessionResources {
   readonly initialEventId: string;
 }
 
+/** Bootstrap already knows its resources; existing sessions need only their stable ID. */
+export interface SessionTarget {
+  readonly sessionId: string;
+  readonly resources?: SessionResources;
+}
+
 export function createSessionResources(
   holderRunId: string,
   initialEventId: string,

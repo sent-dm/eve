@@ -37,12 +37,12 @@ describe("turn admission receipts", () => {
     mocks.getRun.mockImplementation((runId: string) => ({
       returnValue: Promise.resolve(
         runId === "first"
-          ? { continuedTo: "second", deliveries: {}, terminal: false }
+          ? { continuedTo: "second", deliveries: { seed: "applied" }, terminal: false }
           : { deliveries: { event: "applied" }, terminal: false },
       ),
     }));
     await expect(waitForTurnReceipt("first")).resolves.toEqual({
-      deliveries: { event: "applied" },
+      deliveries: { event: "applied", seed: "applied" },
       terminal: false,
     });
     expect(mocks.getRun.mock.calls).toEqual([["first"], ["second"]]);

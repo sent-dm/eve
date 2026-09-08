@@ -90,6 +90,18 @@ describe("task-scoped submission cancellation", () => {
     expect(result.deliveries).toEqual({ cancel: "retired" });
   });
 
+  it("keeps another submission admitted by the same candidate", () => {
+    const seed = message("seed", "task-a");
+    const followup = { ...message("followup", "task-b"), candidateRunId: seed.candidateRunId };
+    const result = retireTaskSubmissions(
+      checkpoint({ inputs: [seed], queue: [followup] }),
+      cancellation("task-a"),
+    );
+    expect(result.inputs).toEqual([]);
+    expect(result.queue).toEqual([followup]);
+    expect(result.deliveries).toEqual({ seed: "retired", cancel: "applied" });
+  });
+
   it("purges all same-batch work even when a mixed message's response was split for admission", () => {
     const original = message("mixed", "task-a");
     const mixed: PendingSubmission = {

@@ -152,7 +152,7 @@ describe("workflow deployment dispatch", () => {
 });
 
 describe("session ingress", () => {
-  it("resolves an alias to its descriptor and starts a turn with the accepted command", async () => {
+  it("resolves only the alias owner before starting a turn with the accepted command", async () => {
     vi.stubEnv("VERCEL_DEPLOYMENT_ID", "accepted");
     const command = {
       kind: "send" as const,
@@ -168,14 +168,14 @@ describe("session ingress", () => {
     };
     await expect(
       runtime().dispatchContinuation({ continuationToken: "slack:thread", command }),
-    ).resolves.toEqual({ status: "accepted", sessionId: "session-1" });
+    ).resolves.toEqual({ status: "accepted", sessionId: "holder-1" });
     expect(getHookByTokenMock).toHaveBeenCalledWith("slack:thread");
-    expect(resolveHolderMock).toHaveBeenCalledWith("holder-1");
+    expect(resolveHolderMock).not.toHaveBeenCalled();
     expect(startMock).toHaveBeenCalledWith(
       turnWorkflowReference,
       [
         {
-          session,
+          sessionId: "holder-1",
           submission: { command, eventId: "delivery-1", acceptedDeploymentId: "accepted" },
         },
       ],
@@ -183,13 +183,15 @@ describe("session ingress", () => {
     );
   });
 
-  it("uses the fixed session descriptor without a hook lookup or snapshot read", async () => {
+  it("starts fixed-session work without reading its holder, descriptor, or snapshots", async () => {
     await runtime().dispatchSession({ sessionId: "public-id", command: { kind: "clear" } });
-    expect(resolveSessionMock).toHaveBeenCalledWith("public-id");
+    expect(resolveSessionMock).not.toHaveBeenCalled();
+    expect(resolveHolderMock).not.toHaveBeenCalled();
+    expect(getRunMock).not.toHaveBeenCalled();
     expect(getHookByTokenMock).not.toHaveBeenCalled();
     expect(startMock).toHaveBeenCalledWith(turnWorkflowReference, [
       {
-        session,
+        sessionId: "public-id",
         submission: expect.objectContaining({
           command: { kind: "clear" },
           eventId: expect.any(String),
@@ -218,10 +220,17 @@ describe("session ingress", () => {
       eventId: "task-delivery",
       acceptedDeploymentId: "accepted-deployment",
     });
-    await dispatchAcceptedSubmission(session, submission);
-    expect(startMock).toHaveBeenCalledWith(turnWorkflowReference, [{ session, submission }], {
-      deploymentId: "accepted-deployment",
-    });
+    await dispatchAcceptedSubmission(
+      { sessionId: session.sessionId, resources: session },
+      submission,
+    );
+    expect(startMock).toHaveBeenCalledWith(
+      turnWorkflowReference,
+      [{ sessionId: session.sessionId, resources: session, submission }],
+      {
+        deploymentId: "accepted-deployment",
+      },
+    );
   });
 
   it("keeps distinct commands distinct even when they share a request", () => {
@@ -235,7 +244,7 @@ describe("session ingress", () => {
       { kind: "session-timeout" },
       "expiry-id",
     );
-    expect(resolveSessionMock).toHaveBeenCalledWith("public-id");
+    expect(resolveSessionMock).not.toHaveBeenCalled();
     expect(getHookByTokenMock).not.toHaveBeenCalled();
     expect(startMock.mock.calls[0]?.[1][0].submission.eventId).toBe("expiry-id");
   });
@@ -254,21 +263,23 @@ describe("session ingress", () => {
     expect(startMock).not.toHaveBeenCalled();
   });
 
-  it("propagates descriptor storage failures instead of treating them as absence", async () => {
-    const failure = new Error("storage unavailable");
-    resolveSessionMock.mockRejectedValueOnce(failure);
+  it("does not wait for descriptor availability to durably accept an existing-session command", async () => {
     await expect(
       runtime().dispatchSession({ sessionId: "session", command: { kind: "clear" } }),
-    ).rejects.toBe(failure);
-    expect(startMock).not.toHaveBeenCalled();
+    ).resolves.toEqual({ status: "accepted", sessionId: "session" });
+    expect(resolveSessionMock).not.toHaveBeenCalled();
+    expect(startMock).toHaveBeenCalledOnce();
   });
 
   it("returns the accepted event identity with its candidate", async () => {
     await expect(
-      dispatchAcceptedSubmission(session, {
-        eventId: "accepted-input",
-        command: { kind: "clear" },
-      }),
+      dispatchAcceptedSubmission(
+        { sessionId: session.sessionId },
+        {
+          eventId: "accepted-input",
+          command: { kind: "clear" },
+        },
+      ),
     ).resolves.toMatchObject({
       eventId: "accepted-input",
       sessionId: "session-1",
@@ -350,8 +361,8 @@ describe("session ingress", () => {
       finish();
       await expect(reset).resolves.toEqual(
         kind === "reset"
-          ? { previousSessionId: "session-1", status: "reset" }
-          : { sessionId: "session-1", status: "accepted" },
+          ? { previousSessionId: "session", status: "reset" }
+          : { sessionId: "session", status: "accepted" },
       );
       expect(getHookByTokenMock).not.toHaveBeenCalled();
     },
@@ -359,6 +370,16 @@ describe("session ingress", () => {
 });
 
 describe("holder creation", () => {
+  it("returns an unaliased session's allocated stream without waiting for bootstrap", async () => {
+    const handle = await runtime().createSession(createInput());
+    expect(handle.sessionId).toBe("candidate-1");
+    expect(resolveHolderMock).not.toHaveBeenCalled();
+    expect(getRunMock).not.toHaveBeenCalled();
+    expect(readEventsMock).not.toHaveBeenCalled();
+    void handle.events;
+    expect(readEventsMock).toHaveBeenCalledWith({ id: '["candidate-1",null]' });
+  });
+
   it("starts only the holder and places initialization in its first submission", async () => {
     vi.stubEnv("VERCEL_DEPLOYMENT_ID", "accepted");
     const handle = await runtime().createSession({
@@ -473,11 +494,11 @@ describe("holder creation", () => {
 });
 
 describe("resource-based reads", () => {
-  it("resolves provider addresses to the descriptor's public session ID", async () => {
+  it("resolves provider addresses directly to their holder", async () => {
     await expect(runtime().resolveContinuation("slack:thread")).resolves.toEqual({
-      sessionId: "session-1",
+      sessionId: "holder-1",
     });
-    expect(resolveHolderMock).toHaveBeenCalledWith("holder-1");
+    expect(resolveHolderMock).not.toHaveBeenCalled();
   });
   it("returns absence only for an unclaimed provider alias", async () => {
     getHookByTokenMock.mockRejectedValueOnce(new HookNotFoundError("missing"));
