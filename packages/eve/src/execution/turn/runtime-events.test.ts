@@ -88,6 +88,7 @@ describe("runtime owner event application", () => {
       { callId: "call", kind: "tool-result", output: "right", toolName: "deploy" },
     ]);
     expect(mocks.cancel).toHaveBeenCalledOnce();
+    expect(result.inputChanged).toBe(false);
   });
 
   it("validates runtime result calls and preserves independent results only once", async () => {
@@ -125,7 +126,57 @@ describe("runtime owner event application", () => {
     });
     expect(result.state).toBe(state);
     expect(result.serializedContext).toBe(serializedContext);
+    expect(result.inputChanged).toBe(false);
   });
+
+  it.each(["question", "authorization.required", "authorization.completed"] as const)(
+    "projects an accepted %s as actionable input only when it requests a response",
+    async (type) => {
+      const input = fixture();
+      mocks.proxy.mockResolvedValue({
+        serializedContext: input.serializedContext,
+        sessionState: input.state,
+      });
+      const request =
+        type === "question"
+          ? {
+              kind: "question",
+              requestId: "question",
+              prompt: "Continue?",
+              action: { callId: from.callId, input: {}, kind: "tool-call", toolName: "deploy" },
+            }
+          : {
+              kind: "authorization-request",
+              event: {
+                kind: "subagent-authorization-event",
+                callId: from.callId,
+                childSessionId: "child",
+                subagentName: "worker",
+                event: { type, data: { name: "connection" } },
+              },
+            };
+      const result = await applyRuntimeEvents({
+        ...input,
+        events: [
+          {
+            kind: "tool.request",
+            eventId: "request",
+            payload: {
+              from,
+              replyTo: {
+                kind: "inbox",
+                address: { token: "tool", ownerRunId: from.runId },
+                requestId: "question",
+              },
+              request,
+            },
+          },
+        ],
+      });
+      expect(mocks.proxy).toHaveBeenCalledOnce();
+      expect(result.inputChanged).toBe(type !== "authorization.completed");
+    },
+  );
 
   it("rejects stale owner targets and unbound child authorization", async () => {
     const events: InboxEnvelope[] = [
@@ -150,5 +201,6 @@ describe("runtime owner event application", () => {
     expect(result.results).toEqual([]);
     expect(mocks.report).not.toHaveBeenCalled();
     expect(mocks.proxy).not.toHaveBeenCalled();
+    expect(result.inputChanged).toBe(false);
   });
 });

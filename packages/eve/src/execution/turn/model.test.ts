@@ -278,7 +278,7 @@ describe("routeProxiedDelivery", () => {
       }),
     });
 
-    expect(result).toMatchObject({ kind: "continue", remainder: undefined });
+    expect(result).toMatchObject({ kind: "continue", remainder: undefined, inputChanged: true });
     expect(dispatchByToken).toHaveBeenCalledWith(
       "child-token",
       {
@@ -458,7 +458,7 @@ describe("routeProxiedDelivery", () => {
     const result = await routeProxiedDelivery({
       ...taskRouteInput,
     });
-    expect(result).toMatchObject({ kind: "continue", remainder: undefined });
+    expect(result).toMatchObject({ kind: "continue", remainder: undefined, inputChanged: true });
     expect(sendTaskInboundPayload).toHaveBeenCalledWith({
       payload: {
         auth: undefined,
@@ -511,6 +511,7 @@ describe("routeProxiedDelivery", () => {
 
     await expect(routeProxiedDelivery({ ...taskRouteInput })).resolves.toMatchObject({
       kind: "continue",
+      inputChanged: false,
       remainder: {
         kind: "deliver",
         payloads: [{ inputResponses: [{ optionId: "approve", requestId: "task-1:request-1" }] }],
@@ -525,6 +526,7 @@ describe("routeProxiedDelivery", () => {
 
     await expect(routeProxiedDelivery({ ...taskRouteInput })).resolves.toMatchObject({
       kind: "continue",
+      inputChanged: false,
       remainder: {
         kind: "deliver",
         payloads: [{ inputResponses: [{ optionId: "approve", requestId: "task-1:request-1" }] }],

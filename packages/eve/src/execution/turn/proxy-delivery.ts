@@ -19,7 +19,10 @@ import {
   retireProxyInputRequests,
 } from "#harness/proxy-input-requests.js";
 
-export type RoutedDeliverResult =
+export type RoutedDeliverResult = {
+  /** An actionable prompt was displayed or its answer was accepted. */
+  readonly inputChanged: boolean;
+} & (
   | {
       readonly kind: "cancel-turn";
       readonly serializedContext: Record<string, unknown>;
@@ -30,7 +33,8 @@ export type RoutedDeliverResult =
       readonly remainder: DeliverHookPayload | undefined;
       readonly serializedContext: Record<string, unknown>;
       readonly sessionState: DurableSessionState;
-    };
+    }
+);
 
 interface ChildBucket {
   readonly inboxResponse?: InboxResponseRoute;
@@ -152,6 +156,7 @@ export async function routeProxiedDelivery(input: {
   }
 
   const context = {
+    inputChanged: retired,
     serializedContext: input.serializedContext ?? {},
     sessionState: retired
       ? replaceDurableSessionSnapshot({ session: durableSession })

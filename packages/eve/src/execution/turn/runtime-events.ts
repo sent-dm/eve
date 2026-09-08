@@ -42,9 +42,11 @@ export async function applyRuntimeEvents(input: {
   readonly serializedContext: Record<string, unknown>;
   readonly results: RuntimeActionResult[];
   readonly acceptedAtMsByCallId: Readonly<Record<string, number>>;
+  readonly inputChanged: boolean;
 }> {
   let state = input.state;
   let serializedContext = input.serializedContext;
+  let inputChanged = false;
   const results: RuntimeActionResult[] = [];
   const acceptedAtMsByCallId: Record<string, number> = {};
   for (const envelope of input.events) {
@@ -87,6 +89,9 @@ export async function applyRuntimeEvents(input: {
         });
         state = applied.sessionState;
         serializedContext = applied.serializedContext;
+        inputChanged ||=
+          payload.kind === "subagent-input-request" ||
+          payload.event.type === "authorization.required";
       }
       continue;
     }
@@ -144,18 +149,22 @@ export async function applyRuntimeEvents(input: {
         state = applied.sessionState;
         serializedContext = applied.serializedContext;
       } else {
+        const hookPayload =
+          request.request.kind === "authorization-request"
+            ? request.request.event
+            : workflowToolRunRequestToInputRequestPayload(request);
         const applied = await runProxySubagentEvent({
           inboxResponse: request.replyTo.kind === "inbox" ? request.replyTo : undefined,
-          hookPayload:
-            request.request.kind === "authorization-request"
-              ? request.request.event
-              : workflowToolRunRequestToInputRequestPayload(request),
+          hookPayload,
           parentWritable: input.eventsWriter,
           serializedContext,
           sessionState: state,
         });
         state = applied.sessionState;
         serializedContext = applied.serializedContext;
+        inputChanged ||=
+          hookPayload.kind === "subagent-input-request" ||
+          hookPayload.event.type === "authorization.required";
       }
       continue;
     }
@@ -201,7 +210,7 @@ export async function applyRuntimeEvents(input: {
     results.push(result);
     acceptedAtMsByCallId[result.callId] = Date.now();
   }
-  return { acceptedAtMsByCallId, results, serializedContext, state };
+  return { acceptedAtMsByCallId, inputChanged, results, serializedContext, state };
 
   function context() {
     return { parentWritable: input.eventsWriter, serializedContext, sessionState: state };

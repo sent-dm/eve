@@ -12,7 +12,10 @@ import type { InitializedSessionCheckpoint } from "#execution/turn/types.js";
 const mocks = vi.hoisted(() => ({ open: vi.fn(), read: vi.fn(), append: vi.fn() }));
 vi.mock("#execution/session/snapshots.js", () => ({ sessionSnapshots: { open: mocks.open } }));
 
-const session = createSessionResources("holder", "initial");
+const session = createSessionResources("holder", "initial", {
+  runId: "holder",
+  deploymentId: "owner-deployment",
+});
 const records: TurnCheckpointRecord[] = [];
 const ref = (index: number): SnapshotRecordRef => ({ streamId: session.snapshots.id, index });
 const committed: InitializedSessionCheckpoint = {
@@ -155,7 +158,10 @@ describe("turn checkpoint log", () => {
     expect(() => log.assertCurrent(ref(1))).toThrow("no longer");
     expect(() =>
       log.assertCurrent({
-        streamId: createSessionResources("other", "initial").snapshots.id,
+        streamId: createSessionResources("other", "initial", {
+          runId: "other",
+          deploymentId: "owner-deployment",
+        }).snapshots.id,
         index: 2,
       }),
     ).toThrow("no longer");

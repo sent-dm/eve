@@ -1,7 +1,21 @@
-import { getRun } from "#internal/workflow/runtime.js";
-import { decodeStreamLocation } from "#execution/session/stream-location.js";
+import { getRun, Run } from "#internal/workflow/runtime.js";
+import { decodeStreamLocation, type StreamOwner } from "#execution/session/stream-location.js";
 
 const READ_TIMEOUT_MS = 10_000;
+
+type StreamAccess = Pick<ReturnType<typeof getRun>, "getReadable" | "getWritable">;
+
+/** Resolve public owner routing once while initializing the holder. */
+export async function resolveStreamOwner(runId: string): Promise<StreamOwner> {
+  const reference = await getRun(runId).getStreamReference();
+  return {
+    runId: reference.runId,
+    deploymentId: reference.deploymentId,
+    ...(reference.encryptionPublicKey === undefined
+      ? {}
+      : { encryptionPublicKey: reference.encryptionPublicKey }),
+  };
+}
 
 export type StreamStorage = ReturnType<typeof storageForOwner>;
 
@@ -11,16 +25,17 @@ export interface StreamStorageScope {
 
 /** Owner/key resolution lives only as long as the current step's scope. */
 export function createStreamStorageScope(): StreamStorageScope {
-  const owners = new Map<string, ReturnType<typeof getRun>>();
+  const owners = new Map<string, StreamAccess>();
   return {
     open(id) {
-      const { runId, namespace } = decodeStreamLocation(id);
-      let owner = owners.get(runId);
-      if (owner === undefined) {
-        owner = getRun(runId);
-        owners.set(runId, owner);
+      const { owner, namespace } = decodeStreamLocation(id);
+      const key = typeof owner === "string" ? owner : owner.runId;
+      let streams = owners.get(key);
+      if (streams === undefined) {
+        streams = typeof owner === "string" ? getRun(owner) : Run.fromStreamReference(owner);
+        owners.set(key, streams);
       }
-      return storageForOwner(owner, namespace);
+      return storageForOwner(streams, namespace);
     },
   };
 }
@@ -29,7 +44,7 @@ export function openStreamStorage(id: string): StreamStorage {
   return createStreamStorageScope().open(id);
 }
 
-function storageForOwner(owner: ReturnType<typeof getRun>, namespace?: string) {
+function storageForOwner(owner: StreamAccess, namespace?: string) {
   const read = <T>(startIndex?: number) => owner.getReadable<T>({ namespace, startIndex });
   const withWriter = async <T, Result>(
     run: (writable: WritableStream<T>) => Promise<Result>,
@@ -64,10 +79,6 @@ function storageForOwner(owner: ReturnType<typeof getRun>, namespace?: string) {
       });
     },
   };
-}
-
-export function streamTailIndex(id: string): Promise<number> {
-  return openStreamStorage(id).tailIndex();
 }
 
 /** Reads one existing record, or waits once for holder initialization. */
@@ -141,12 +152,4 @@ async function contribute<T, Result>(
   if (failures.length > 1)
     throw new AggregateError(failures, "Session stream durability flush failed.");
   return outcome.value;
-}
-
-export function appendStreamRecords<T>(
-  id: string,
-  records: readonly T[],
-  close = false,
-): Promise<void> {
-  return openStreamStorage(id).append(records, close);
 }

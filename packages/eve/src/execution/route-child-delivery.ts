@@ -17,6 +17,7 @@ export async function routeDeliverToChildren(input: {
   const payload = coalesceDeliverPayloads(input.delivery.payloads);
   let serializedContext = input.serializedContext;
   let sessionState = input.sessionState;
+  let inputChanged = false;
 
   for (const request of payload.task?.inputRequests ?? []) {
     const recorded = await recordTaskInputRequest({
@@ -33,6 +34,7 @@ export async function routeDeliverToChildren(input: {
     });
     serializedContext = emitted.serializedContext;
     sessionState = emitted.sessionState;
+    inputChanged = true;
   }
 
   for (const request of payload.task?.agentRequests ?? []) {
@@ -61,6 +63,7 @@ export async function routeDeliverToChildren(input: {
     });
     serializedContext = emitted.serializedContext;
     sessionState = emitted.sessionState;
+    inputChanged ||= delivery.hookPayload.event.type === "authorization.required";
   }
 
   // Child settlement carries the authoritative parked/terminal handle verdict
@@ -96,7 +99,13 @@ export async function routeDeliverToChildren(input: {
           payloads: ordinaryPayloads,
         };
   if (delivery === undefined) {
-    return { kind: "continue", remainder: undefined, serializedContext, sessionState };
+    return {
+      kind: "continue",
+      remainder: undefined,
+      serializedContext,
+      sessionState,
+      inputChanged,
+    };
   }
   if (!sessionState.hasProxyInputRequests) {
     return {
@@ -104,12 +113,14 @@ export async function routeDeliverToChildren(input: {
       remainder: delivery,
       serializedContext,
       sessionState,
+      inputChanged,
     };
   }
 
-  return await routeProxiedDelivery({
+  const routed = await routeProxiedDelivery({
     delivery,
     serializedContext,
     sessionState,
   });
+  return { ...routed, inputChanged: inputChanged || routed.inputChanged };
 }

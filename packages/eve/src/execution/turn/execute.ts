@@ -249,6 +249,7 @@ async function executeTurn(
   const eventStream = sessionEvents.open(input.session.events, storage);
   checkpoint = await eventStream.withWriter(async (events) => {
     let state = admitted;
+    let inputChanged = false;
     if (input.work.kind !== "dispatch") {
       const envelopes = input.work.envelopes ?? [];
       const submissions = envelopes.filter((envelope) => envelope.kind === "session.submit");
@@ -279,6 +280,7 @@ async function executeTurn(
         serializedContext: state.serializedContext,
         state: state.state,
       });
+      inputChanged = runtime.inputChanged;
       state = {
         ...state,
         state: runtime.state,
@@ -386,12 +388,13 @@ async function executeTurn(
           result: cancelledResult(state),
         };
       payload = routed.remainder;
+      inputChanged ||= routed.inputChanged;
       if (payload === undefined) {
         return {
           ...state,
           deliveries: applied,
           inputs: remaining,
-          result: state.result ?? idleResult(state),
+          result: state.result ?? idleResult(state, inputChanged),
         };
       }
     }
@@ -400,7 +403,7 @@ async function executeTurn(
         ...state,
         deliveries: applied,
         inputs: remaining,
-        result: state.result ?? idleResult(state),
+        result: state.result ?? idleResult(state, inputChanged),
       };
     }
     if (state.result?.settlement !== undefined) {
@@ -459,18 +462,19 @@ function isRuntimeEvent(payload: HookPayload): boolean {
   );
 }
 
-// Runtime-only progress settles independently while durable child prompts remain answerable.
-function idleResult(checkpoint: InitializedSessionCheckpoint) {
+function idleResult(checkpoint: InitializedSessionCheckpoint, inputChanged = false) {
   return {
     action: "park" as const,
     hasPendingAuthorization: false,
     hasPendingInputBatch: false,
-    settlement: {
-      events: [
-        stampMessageStreamEvent(createSessionWaitingEvent(checkpoint.state.continuationToken)),
-      ],
-      emissionAfter: checkpoint.state.emissionState,
-    },
+    settlement: inputChanged
+      ? {
+          events: [
+            stampMessageStreamEvent(createSessionWaitingEvent(checkpoint.state.continuationToken)),
+          ],
+          emissionAfter: checkpoint.state.emissionState,
+        }
+      : undefined,
     sessionState: checkpoint.state,
     serializedContext: checkpoint.serializedContext,
   };

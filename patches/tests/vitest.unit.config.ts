@@ -10,6 +10,7 @@ export default {
   resolve: {
     alias: [
       { find: "#workflow-sdk", replacement: sdk },
+      { find: "#world-vercel", replacement: dirname(require.resolve("@workflow/world-vercel")) },
       { find: /^@workflow\/serde$/, replacement: require.resolve("@workflow/serde") },
       { find: /^@workflow\/errors$/, replacement: require.resolve("@workflow/errors") },
       { find: /^@workflow\/world$/, replacement: require.resolve("@workflow/world") },
@@ -26,7 +27,7 @@ export default {
   },
   test: {
     // Transform the SDK so World mocks also apply to its internal imports.
-    server: { deps: { inline: [/\/@workflow\/core\//] } },
+    server: { deps: { inline: [/\/@workflow\/core\//, /\/@workflow\/world-vercel\//] } },
     include: ["patches/tests/*.test.ts"],
     testTimeout: 5_000,
     fileParallelism: false,

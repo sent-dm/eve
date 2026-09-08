@@ -141,6 +141,12 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: pnpm exec bootstrap
 
+      - name: Verify PostgreSQL hook ownership
+        if: matrix.name == 'fixture-tasks'
+        env:
+          EVE_TEST_POSTGRES_URL: ${{ env.WORKFLOW_POSTGRES_URL }}
+        run: node --test --test-timeout=30000 patches/tests/workflow-postgres-hook-claim.integration.mjs
+
       - name: Build fixture, start production server, and run evals
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}

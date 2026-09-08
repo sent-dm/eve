@@ -1,3 +1,4 @@
+import { resolveStreamOwner } from "#execution/session/stream-storage.js";
 import { createHook, getWorkflowMetadata } from "#compiled/@workflow/core/index.js";
 import {
   initializeSessionResources,
@@ -46,9 +47,10 @@ export async function sessionStorageHolderFixtureWorkflow(): Promise<void> {
 
 async function initializeStorageFixtureStep(runId: string): Promise<void> {
   "use step";
-  const resources = createSessionResources(runId, "initial");
+  const owner = await resolveStreamOwner(runId);
+  const resources = createSessionResources(runId, "initial", owner);
   await initializeSessionResources(resources);
-  await publishSessionDescriptor(runId, resources);
+  await publishSessionDescriptor(owner, resources);
 }
 
 /** Only stable identifiers cross the workflow boundary; snapshots stay inside the step. */

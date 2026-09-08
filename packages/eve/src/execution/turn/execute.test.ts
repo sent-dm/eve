@@ -72,7 +72,10 @@ vi.mock("#subagents/parent-notification.js", () => ({
 }));
 vi.mock("#execution/session-timeout-steps.js", () => ({ startSessionTimeout: vi.fn() }));
 
-const session = createSessionResources("holder", "first");
+const session = createSessionResources("holder", "first", {
+  runId: "holder",
+  deploymentId: "owner-deployment",
+});
 const ref: SnapshotRecordRef = { streamId: session.snapshots.id, index: 1 };
 const owner = { token: "inbox", ownerRunId: "candidate" };
 const submission: AcceptedSubmission = {
@@ -135,11 +138,13 @@ beforeEach(() => {
   }));
   mocks.route.mockImplementation(async (input) => ({
     kind: "continue",
+    inputChanged: false,
     remainder: input.delivery,
     sessionState: input.sessionState,
     serializedContext: input.serializedContext,
   }));
   mocks.runtime.mockImplementation(async (input) => ({
+    inputChanged: false,
     state: input.state,
     serializedContext: input.serializedContext,
     results: [],
@@ -526,11 +531,18 @@ describe("turn execution boundary", () => {
     expect(committed.result).toMatchObject({ cancellationState, cancellationContext });
   });
 
-  it.each(["runtime", "answer"] as const)(
-    "settles idle %s progress without fabricating a model turn or dropping child prompts",
-    async (kind) => {
+  it.each([
+    { kind: "runtime", inputChanged: true },
+    { kind: "runtime", inputChanged: false },
+    { kind: "task", inputChanged: true },
+    { kind: "task", inputChanged: false },
+    { kind: "answer", inputChanged: true },
+  ] as const)(
+    "settles idle $kind traffic with a waiting event only when inputChanged=$inputChanged",
+    async ({ kind, inputChanged }) => {
       const state = { ...checkpoint.state, hasProxyInputRequests: true };
       mocks.runtime.mockResolvedValue({
+        inputChanged: kind === "runtime" && inputChanged,
         state,
         serializedContext: { retained: true },
         results: [],
@@ -538,6 +550,7 @@ describe("turn execution boundary", () => {
       });
       mocks.route.mockImplementation(async (input) => ({
         kind: "continue",
+        inputChanged,
         remainder: undefined,
         sessionState: input.sessionState,
         serializedContext: input.serializedContext,
@@ -550,7 +563,10 @@ describe("turn execution boundary", () => {
               ? { kind: "runtime", payload: { kind: "runtime-action-result", results: [] } }
               : {
                   kind: "send",
-                  payload: { inputResponses: [{ requestId: "first", text: "yes" }] },
+                  payload:
+                    kind === "answer"
+                      ? { inputResponses: [{ requestId: "first", text: "yes" }] }
+                      : { task: { views: [] } },
                 },
         },
       });
@@ -559,10 +575,14 @@ describe("turn execution boundary", () => {
       const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
       expect(committed.state.hasProxyInputRequests).toBe(true);
       expect(committed.serializedContext).toEqual({ retained: true });
-      expect(committed.result?.settlement?.events.map((event) => event.type)).toEqual([
-        "session.waiting",
-      ]);
-      expect(committed.result?.settlement?.emissionAfter).toEqual(state.emissionState);
+      if (inputChanged) {
+        expect(committed.result?.settlement?.events.map((event) => event.type)).toEqual([
+          "session.waiting",
+        ]);
+        expect(committed.result?.settlement?.emissionAfter).toEqual(state.emissionState);
+      } else {
+        expect(committed.result?.settlement).toBeUndefined();
+      }
     },
   );
 
@@ -584,6 +604,7 @@ describe("turn execution boundary", () => {
     };
     mocks.route.mockImplementation(async (input) => ({
       kind: "continue",
+      inputChanged: true,
       remainder: undefined,
       sessionState: input.sessionState,
       serializedContext: input.serializedContext,
@@ -611,6 +632,7 @@ describe("turn execution boundary", () => {
     });
     expect(mocks.model).not.toHaveBeenCalled();
     expect(mocks.route).toHaveBeenCalledOnce();
+    expect(mocks.append.mock.lastCall?.[0].result?.settlement).toBeUndefined();
     expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
       deliveries: { "next:response": "applied" },
       inputs: [],

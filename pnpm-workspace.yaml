@@ -78,3 +78,4 @@ minimumReleaseAgeExclude:
 
 patchedDependencies:
   "@workflow/core@5.0.0-beta.47": patches/@workflow__core@5.0.0-beta.47.patch
+  "@workflow/world-postgres@5.0.0-beta.39": patches/@workflow__world-postgres@5.0.0-beta.39.patch

@@ -1,3 +1,4 @@
+import { resolveStreamOwner } from "#execution/session/stream-storage.js";
 import { createSessionResources } from "#execution/session/resources.js";
 import {
   initializeSessionResources,
@@ -13,9 +14,10 @@ export async function initializeHolderStep(
   firstTurn: AcceptedSubmission,
 ): Promise<SessionResources> {
   "use step";
-  const resources = createSessionResources(runId, firstTurn.eventId);
+  const owner = await resolveStreamOwner(runId);
+  const resources = createSessionResources(runId, firstTurn.eventId, owner);
   await initializeSessionResources(resources, firstTurn);
-  await publishSessionDescriptor(runId, resources);
+  await publishSessionDescriptor(owner, resources);
   return resources;
 }
 
@@ -27,5 +29,5 @@ export async function redirectHolderStep(
   "use step";
   const resources = await sessionDirectory.resolveHolder(ownerRunId);
   await dispatchTurn({ sessionId: resources.sessionId, resources }, submission);
-  await publishSessionDescriptor(runId, resources);
+  await publishSessionDescriptor(await resolveStreamOwner(runId), resources);
 }

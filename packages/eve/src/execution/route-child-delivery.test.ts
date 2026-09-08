@@ -73,6 +73,7 @@ describe("task HITL delivery routing", () => {
       sessionState: recordedState,
     });
     vi.mocked(routeProxiedDelivery).mockResolvedValue({
+      inputChanged: false,
       kind: "continue",
       remainder: undefined,
       serializedContext: { adapter: "updated" },
@@ -89,7 +90,7 @@ describe("task HITL delivery routing", () => {
       sessionState: state(false),
     });
 
-    expect(result).toMatchObject({ kind: "continue", remainder: undefined });
+    expect(result).toMatchObject({ kind: "continue", remainder: undefined, inputChanged: true });
     expect(recordTaskInputRequest).toHaveBeenCalledOnce();
     expect(recordTaskInputRequest).toHaveBeenCalledWith(
       expect.objectContaining({ request: taskRequest }),
@@ -119,7 +120,7 @@ describe("task HITL delivery routing", () => {
       sessionState: state(false),
     });
 
-    expect(result).toMatchObject({ kind: "continue", remainder: undefined });
+    expect(result).toMatchObject({ kind: "continue", remainder: undefined, inputChanged: false });
     expect(emitRecordedTaskInputRequest).not.toHaveBeenCalled();
     expect(routeProxiedDelivery).not.toHaveBeenCalled();
   });
@@ -174,6 +175,7 @@ describe("task HITL delivery routing", () => {
     );
     expect(result).toMatchObject({
       kind: "continue",
+      inputChanged: true,
       serializedContext: { adapter: "updated" },
       sessionState: nextState,
     });
@@ -251,12 +253,13 @@ describe("task HITL delivery routing", () => {
       },
     );
     expect(acceptTaskAuthorizationEvent).not.toHaveBeenCalled();
-    expect(routed).toMatchObject({ sessionState: nextState });
+    expect(routed).toMatchObject({ sessionState: nextState, inputChanged: false });
   });
 
   it("reindexes ordinary metadata after consuming task-only payloads", async () => {
     const routedState = state(true);
     vi.mocked(routeProxiedDelivery).mockResolvedValue({
+      inputChanged: false,
       kind: "continue",
       remainder: undefined,
       serializedContext: {},

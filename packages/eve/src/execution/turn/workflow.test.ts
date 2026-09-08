@@ -47,7 +47,10 @@ vi.mock("#execution/await-run.js", () => ({
 }));
 import { turnWorkflow } from "#execution/turn/workflow.js";
 
-const resources = createSessionResources("session", "input");
+const resources = createSessionResources("session", "input", {
+  runId: "session",
+  deploymentId: "owner-deployment",
+});
 const input: TurnWorkflowInput = {
   sessionId: resources.sessionId,
   submission: { eventId: "input", command: { kind: "send", payload: { message: "hello" } } },

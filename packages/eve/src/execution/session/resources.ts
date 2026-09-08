@@ -1,3 +1,5 @@
+import { encodeStreamLocation, type StreamOwner } from "#execution/session/stream-location.js";
+
 type Id<Kind extends string> = string & { readonly __kind: Kind };
 
 export type SessionId = Id<"session">;
@@ -39,14 +41,15 @@ export interface SessionTarget {
 export function createSessionResources(
   holderRunId: string,
   initialEventId: string,
+  owner: StreamOwner,
 ): SessionResources {
   return {
     sessionId: holderRunId as SessionId,
     holderRunId: holderRunId as WorkflowRunId,
-    events: { id: encodeStreamLocation({ runId: holderRunId }) as EventStreamId },
+    events: { id: encodeStreamLocation({ owner }) as EventStreamId },
     snapshots: {
       id: encodeStreamLocation({
-        runId: holderRunId,
+        owner,
         namespace: "eve.session.snapshots",
       }) as SnapshotStreamId,
     },
@@ -54,4 +57,3 @@ export function createSessionResources(
     initialEventId,
   };
 }
-import { encodeStreamLocation } from "#execution/session/stream-location.js";

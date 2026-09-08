@@ -76,3 +76,56 @@ claim failures, lost acknowledgements, competing activations, concurrent payload
 pagination, and budget exhaustion. The original upstream runtime/precondition
 tests also passed in the isolated build (67 tests including the new cases).
 Hosted timing is measured separately; local tests establish scheduling and safety.
+
+### Local amendment for upstream: resolve immutable stream references
+
+`Run#getStreamReference()` now issues a plain reference containing the owner's run
+ID, deployment ID, optional namespace and public encryption key.
+`Run.fromStreamReference()` reconstructs local read/write accessors without fetching
+the owner again. Explicit namespace options override the reference's default.
+Private keys and accessor caches remain inside the current execution.
+
+Explicit reference readers use the existing World overload
+`getEncryptionKeyForRun(runId, { deploymentId })`. Ordinary Run readers keep their
+full-Run callback. The stock Vercel World still authorizes cross-deployment key
+requests against the actual owner deployment. A public reference permits sealed
+writes, but does not grant private read keys or bypass stream authorization.
+
+The holder resolves routing during its existing initialization step and stores it
+inside eve-owned opaque stream IDs. Each step retains one handle per owner, so a
+cold descriptor read and subsequent snapshot reads share their existing key cache.
+Steps that already have resolved routing avoid owner metadata lookups. Descriptor
+discovery still needs its ordinary read and may resolve the holder's input payload.
+
+The installed SDK tests cover immutable references, encrypted and plaintext frames,
+namespace sharing, failed-key retries, write-only access, cancellation before the
+first read, and stock Vercel key routing. Native storage tests verify owner routing,
+encrypted contributor writes, and key-resolution counts across cold and resolved
+scopes. This API is a local proposal for upstream review; retain or re-evaluate it
+when upgrading the SDK.
+
+## PostgreSQL hook ownership
+
+`@workflow__world-postgres@5.0.0-beta.39.patch` fixes concurrent hook claims in the
+PostgreSQL World. Its token index is nonunique: two callers can both observe no
+owner and insert different hook IDs for the same token. The original hook and
+creation-event inserts also commit separately, making a hook visible before its
+creation event and leaving orphan claims after failed event writes.
+
+The patch takes a transaction-scoped advisory lock for the token, reads retained
+ownership in a separate `READ COMMITTED` statement, and writes the hook and event
+in the same transaction. Existing hook rows are locked against disposal. Replay
+deduplication, orphan recovery, and terminal-token retention keep their existing
+semantics. Correlated-event conflicts share the existing error translation.
+
+The uncontended claim uses nine SQL statements, compared with six before the fix:
+the added statements are `BEGIN`, the token lock, and `COMMIT`. This cost applies
+only to PostgreSQL claims. No eve preflight or Vercel World request is added.
+
+The [PostgreSQL integration suite](./tests/README.md) runs the installed package
+against its actual migrations. The unpatched implementation reproduced duplicate
+owners; the patched implementation passes concurrent claims, replay, failed-write
+rollback, atomic publication, disposal, and retention checks. All writers using a
+database must use the fix; this patch does not repair already-duplicated tokens.
+Remove the patch and its `patchedDependencies` entry when upgrading to an upstream
+release with equivalent atomic ownership guarantees.

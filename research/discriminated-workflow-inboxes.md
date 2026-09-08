@@ -117,6 +117,14 @@ That is a **small third metadata stream**, not another continually written log; 
 contains references, never writer handles or turn state. This uses an existing
 primitive without adding a database. Only the directory adapter knows this layout.
 
+The holder's initialization step resolves immutable owner routing once: run ID,
+deployment ID, and optional public encryption key. The Workflow adapter encodes
+that routing inside each opaque stream ID and reconstructs local SDK accessors
+when a step opens it. Private keys stay inside the current execution. A descriptor
+lookup starts with only a holder locator and still needs discovery; subsequent
+accesses in that step reuse its handle and encryption context. Cross-deployment
+read authorization remains an authenticated request to the owning deployment.
+
 ```ts
 interface SessionDirectory {
   resolveSession(id: SessionId): Promise<SessionResources>;
@@ -650,6 +658,13 @@ checks depend on them; they add no separate network write. Snapshot commits,
 event delivery, readiness acknowledgements, and child results retain their
 required durable ordering.
 
+Tool and task starts read their published owner through the shared bounded record
+reader. Successful reads do not start a native completion waiter or inspect stream
+tails. Native status and failure details are read only after a record read fails;
+an executor that fails before publication can therefore take the existing
+10-second read deadline to report its failure. Admitted executor supervision is
+unchanged.
+
 Locator-only admission removes descriptor and owner-status reads from HTTP
 follow-ups. Provider ingress performs only its alias lookup before starting a
 candidate. The owner reads the descriptor inside its existing execute step,
@@ -658,6 +673,15 @@ operations for the first descriptor-cold follow-up, then 12 with the descriptor
 cached. This moves a read off admission; it does not remove the cold descriptor
 payload read. Bootstrap ordering, early steer/queue/cancel, and image restoration
 across turns pass native coverage.
+
+With explicit stream-owner references, the same native test measures **12 cold / 10
+cached** holder operations. The cold path performs one owner metadata read and
+three payload reads; the cached path performs zero owner metadata reads and two
+payload reads. Both retain seven single writes and one batched write. Encrypted
+storage tests also count key resolution: descriptor and snapshot access share one
+key lookup, and the next step resolves its own key once. This prevents a metadata
+optimization from introducing a duplicate cross-deployment key request. The new
+SDK surface and authorization boundaries are recorded in [patch maintenance](../patches/README.md).
 
 These small local samples establish operation counts, not hosted latency. Repeated
 local runs showed similar roughly 220 ms client times despite the lower call count;
@@ -675,6 +699,7 @@ Hosted observations of the same deterministic fixture, each with 99 warm turns:
 | [Step storage scope and overlapping writes](https://github.com/vercel/eve/actions/runs/34262101510/job/102182828113) | 1,408 ms | 1,871 ms |      401 ms |       348 ms |             2/99 |
 | [In-process hook replay](https://github.com/vercel/eve/actions/runs/34264197868/job/102189665926)                    | 1,145 ms | 1,867 ms |      369 ms |       351 ms |             4/99 |
 | [Direct candidate admission](https://github.com/vercel/eve/actions/runs/34266537084/job/102197665788)                | 1,082 ms | 1,451 ms |      364 ms |       337 ms |             4/99 |
+| [Background observability](https://github.com/vercel/eve/actions/runs/34268266124/job/102205037091)                  | 1,114 ms | 1,741 ms |      368 ms |       334 ms |             4/99 |
 
 The log and metadata-cache checkpoints passed both sequential and concurrent stress scenarios. These
 are separate hosted observations, not interleaved trials. The abort cleanup
@@ -692,6 +717,11 @@ Direct admission passed both stress scenarios: warm median 1,082 ms, p95 1,451 m
 maximum 1,932 ms; concurrent second turns measured 1,317 ms median and 1,828 ms p95.
 The subsecond requirement remains unmet. Each checkpoint is a separate hosted
 sample; lower outliers in one run do not establish that tail delays are fixed.
+The background-observability checkpoint also passed both scenarios but did not
+show a latency improvement: 1,114 ms warm median, 1,741 ms p95, and 3,183 ms maximum.
+Concurrent second turns measured 1,300 ms median and 4,296 ms p95. Native tests
+separately prove that a blocked attribute transport cannot hold workflow completion;
+removing that dependency is not a claim that those writes dominated this fixture.
 The CI report retains raw client samples and native run/step timings, including
 partial reports when a scenario fails. Event timestamps mark event construction,
 not persistence or client receipt.

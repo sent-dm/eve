@@ -4,12 +4,10 @@ import type { SessionResources, SessionTarget } from "#execution/session/resourc
 import { sessionSnapshots } from "#execution/session/snapshots.js";
 import type { SessionBootstrap } from "#execution/turn/checkpoint-log.js";
 import type { AcceptedSubmission } from "#execution/turn/types.js";
-import { encodeStreamLocation } from "#execution/session/stream-location.js";
+import { encodeStreamLocation, type StreamOwner } from "#execution/session/stream-location.js";
 import {
-  appendStreamRecords,
   createStreamStorageScope,
-  readStreamRecord,
-  streamTailIndex,
+  openStreamStorage,
   type StreamStorageScope,
 } from "#execution/session/stream-storage.js";
 
@@ -17,21 +15,23 @@ const DESCRIPTOR_CACHE_LIMIT = 256;
 const caches = new WeakMap<object, Map<string, Promise<SessionResources>>>();
 
 function descriptorStream(holderRunId: string): string {
-  return encodeStreamLocation({ runId: holderRunId, namespace: "eve.session.resources" });
+  return encodeStreamLocation({ owner: holderRunId, namespace: "eve.session.resources" });
 }
 
 export async function publishSessionDescriptor(
-  holderRunId: string,
+  owner: StreamOwner,
   resources: SessionResources,
 ): Promise<void> {
-  const stream = descriptorStream(holderRunId);
-  if ((await streamTailIndex(stream)) !== -1) {
-    if (!isDeepStrictEqual(await readStreamRecord<SessionResources>(stream), resources)) {
+  const stream = openStreamStorage(
+    encodeStreamLocation({ owner, namespace: "eve.session.resources" }),
+  );
+  if ((await stream.tailIndex()) !== -1) {
+    if (!isDeepStrictEqual(await stream.readRecord<SessionResources>(), resources)) {
       throw new Error("An immutable session resource was published with different contents.");
     }
     return;
   }
-  await appendStreamRecords(stream, [resources], true);
+  await stream.append([resources], true);
 }
 
 export async function initializeSessionResources(

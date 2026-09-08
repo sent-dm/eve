@@ -1,5 +1,7 @@
+import { decodeStreamLocation, encodeStreamLocation } from "#execution/session/stream-location.js";
+import { createStreamStorageScope } from "#execution/session/stream-storage.js";
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { sessionDirectory } from "#execution/session/directory.js";
 import { sessionEvents } from "#execution/session/events.js";
 import type { SessionResources } from "#execution/session/resources.js";
@@ -130,6 +132,52 @@ describe("session storage through native independent workflow contributors", () 
       const contributorRun = await world.runs.get(second.runId, { resolveData: "none" });
       expect(ownerRun.encryptionPublicKey).toEqual(expect.any(String));
       expect(ownerRun.encryptionPublicKey).not.toBe(contributorRun.encryptionPublicKey);
+      const routing = {
+        runId: ownerRun.runId,
+        deploymentId: ownerRun.deploymentId,
+        encryptionPublicKey: ownerRun.encryptionPublicKey,
+      };
+      expect(decodeStreamLocation(resources.events.id)).toEqual({ owner: routing });
+      expect(decodeStreamLocation(resources.snapshots.id)).toEqual({
+        owner: routing,
+        namespace: "eve.session.snapshots",
+      });
+      const ownerLookup = vi.spyOn(world.runs, "get");
+      const ownerKey = vi.spyOn(world, "getEncryptionKeyForRun");
+      try {
+        const coldScope = createStreamStorageScope();
+        await coldScope
+          .open(encodeStreamLocation({ owner: holderRunId, namespace: "eve.session.resources" }))
+          .readRecord();
+        const coldSnapshots = await sessionSnapshots.open(resources.snapshots, coldScope);
+        expect(coldSnapshots.latest?.ref).toEqual(secondResult.checkpoint);
+        expect(ownerLookup.mock.calls.filter(([runId]) => runId === holderRunId)).toHaveLength(1);
+        expect(ownerKey).toHaveBeenCalledTimes(1);
+        expect(ownerKey.mock.calls[0]?.[0]).toMatchObject({
+          runId: holderRunId,
+          deploymentId: ownerRun.deploymentId,
+        });
+        ownerLookup.mockClear();
+        const scope = createStreamStorageScope();
+        const resolvedSnapshots = await sessionSnapshots.open(resources.snapshots, scope);
+        expect(resolvedSnapshots.latest?.ref).toEqual(secondResult.checkpoint);
+        const resolvedEvents = sessionEvents.open(resources.events, scope).read().getReader();
+        try {
+          expect((await resolvedEvents.read()).value).toMatchObject({ type: "message.received" });
+        } finally {
+          await resolvedEvents.cancel();
+          resolvedEvents.releaseLock();
+        }
+        expect(ownerLookup.mock.calls.filter(([runId]) => runId === holderRunId)).toHaveLength(0);
+        expect(ownerKey).toHaveBeenCalledTimes(2);
+        expect(ownerKey.mock.calls[1]).toEqual([
+          holderRunId,
+          { deploymentId: ownerRun.deploymentId },
+        ]);
+      } finally {
+        ownerLookup.mockRestore();
+        ownerKey.mockRestore();
+      }
       for (const name of await world.streams.list(holder.runId)) {
         const chunks = await world.streams.getChunks(holder.runId, name, { limit: 1 });
         expect(new TextDecoder().decode(chunks.data[0]!.data.subarray(4, 8))).toBe("encp");

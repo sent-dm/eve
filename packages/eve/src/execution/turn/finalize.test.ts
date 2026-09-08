@@ -94,7 +94,10 @@ vi.mock("#internal/workflow/runtime.js", () => ({
 }));
 vi.mock("#execution/tasks/workflow-target.js", () => ({ isTaskWorkflowTargetGone: () => false }));
 
-const resources = createSessionResources("holder", "initial");
+const resources = createSessionResources("holder", "initial", {
+  runId: "holder",
+  deploymentId: "owner-deployment",
+});
 const records = new Map<string, TurnCheckpointRecord>();
 const indices = new Map<string, number>();
 let current: TurnCheckpointRecord | undefined;

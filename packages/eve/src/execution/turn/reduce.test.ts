@@ -5,7 +5,13 @@ import type { AcceptedSubmission, TurnProgress } from "#execution/turn/types.js"
 import { interruptionKind, reduceTurnBoundary } from "#execution/turn/reduce.js";
 
 const progress: TurnProgress = {
-  checkpoint: { streamId: createSessionResources("session", "initial").snapshots.id, index: 1 },
+  checkpoint: {
+    streamId: createSessionResources("session", "initial", {
+      runId: "session",
+      deploymentId: "owner-deployment",
+    }).snapshots.id,
+    index: 1,
+  },
   turnId: "active-turn",
   action: "settle",
   terminal: false,
