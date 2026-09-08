@@ -276,10 +276,13 @@ async function postPrivateToolApproval(input: {
     threadTs: input.channel.slack.threadTs,
   };
   const post = input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
-  const threadUrl = slackThreadUrl({ ...route, messageTs: input.previewMessageTs });
+  const threadUrl = await resolveSlackMessagePermalink({
+    channel: input.channel,
+    messageTs: input.previewMessageTs,
+  });
   if (threadUrl !== undefined) {
     // A standalone Slack message permalink renders as Slack's native forwarded-message preview.
-    await post(threadUrl);
+    await post({ markdown: threadUrl, unfurlLinks: true });
   }
   if (parts.details !== undefined) {
     await post({ blocks: routeHitlBlocks(parts.details.blocks, route), text: parts.details.text });
@@ -293,14 +296,18 @@ async function postPrivateToolApproval(input: {
   });
 }
 
-function slackThreadUrl(route: {
-  readonly channelId: string;
+async function resolveSlackMessagePermalink(input: {
+  readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
   readonly messageTs: string;
-  readonly threadTs: string;
-}): string | undefined {
-  if (!route.channelId || !route.messageTs || !route.threadTs) return undefined;
-  const messageTs = route.messageTs.replace(".", "");
-  return `https://slack.com/archives/${encodeURIComponent(route.channelId)}/p${messageTs}?thread_ts=${encodeURIComponent(route.threadTs)}&cid=${encodeURIComponent(route.channelId)}`;
+}): Promise<string | undefined> {
+  if (!input.channel.slack.channelId || !input.messageTs) return undefined;
+  const response = await input.channel.slack.request("chat.getPermalink", {
+    channel: input.channel.slack.channelId,
+    message_ts: input.messageTs,
+  });
+  return response.ok === true && typeof response.permalink === "string"
+    ? response.permalink
+    : undefined;
 }
 
 function recordApprovalCards(

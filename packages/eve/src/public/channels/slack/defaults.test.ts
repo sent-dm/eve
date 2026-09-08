@@ -47,7 +47,14 @@ function buildChannelStub(state: Partial<SlackChannelState> = {}) {
     .mockResolvedValue({ id: "dm1", raw: { channel: "D123", ok: true } });
   const post = vi.fn().mockResolvedValue({ id: "ts1", raw: { ok: true } });
   const startTyping = vi.fn().mockResolvedValue(undefined);
-  const request = vi.fn().mockResolvedValue({ ok: true });
+  const request = vi.fn(async (operation: string, _body: unknown) =>
+    operation === "chat.getPermalink"
+      ? {
+          ok: true,
+          permalink: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
+        }
+      : { ok: true },
+  );
   const channel = {
     thread: { postDirectMessage, postEphemeral, post, startTyping } as Partial<
       SlackEventContext["thread"]
@@ -128,12 +135,19 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     expect(postDirectMessage.mock.calls.every(([userId]) => userId === "U_REVIEWER")).toBe(true);
     expect(postDirectMessage.mock.calls[0]).toEqual([
       "U_REVIEWER",
-      "https://slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
+      {
+        markdown: "https://example.slack.com/archives/C123/p111333?thread_ts=111.222&cid=C123",
+        unfurlLinks: true,
+      },
     ]);
     expect(JSON.stringify(postDirectMessage.mock.calls[1])).toContain("private draft");
     expect(JSON.stringify(postDirectMessage.mock.calls[2])).toContain(
       "eve_input:route:C123:111.222:tool-approval:approval-1",
     );
+    expect(request).toHaveBeenCalledWith("chat.getPermalink", {
+      channel: "C123",
+      message_ts: "111.333",
+    });
     expect(channel.state.pendingApprovalCards?.["approval-1"]?.messageChannelId).toBe("D123");
 
     await defaultEvents["approval.settled"]!(

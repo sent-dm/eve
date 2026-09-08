@@ -735,6 +735,27 @@ describe("SlackThread.postDirectMessage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("enables link unfurls when requested", async () => {
+    const { thread } = buildSlackBinding({
+      botToken: "xoxb-test",
+      channelId: "C01",
+      threadTs: "1.0",
+      teamId: undefined,
+    });
+
+    await thread.postDirectMessage("U99", {
+      markdown: "https://example.slack.com/archives/C01/p100",
+      unfurlLinks: true,
+    });
+
+    const post = mock.calls.find((c) => c.url === "https://slack.com/api/chat.postMessage");
+    expect(post?.body).toMatchObject({
+      channel: "D777",
+      markdown_text: "https://example.slack.com/archives/C01/p100",
+      unfurl_links: "true",
+    });
+  });
+
   it("opens the IM conversation and posts to it without a thread_ts", async () => {
     const { thread } = buildSlackBinding({
       botToken: "xoxb-test",
