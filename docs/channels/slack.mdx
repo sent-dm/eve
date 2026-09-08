@@ -439,21 +439,18 @@ export default slackChannel({
 
 HITL renders as Slack buttons and selects. Fixed-choice actions and freeform modal submissions pass through `onInputResponse` before the parked session resumes. The initial **Type your answer** action only opens eve's modal; the hook runs when the user submits an answer.
 
-Set `privateToolApprovals` when tool inputs must be visible only to one reviewer. eve sends the preview and controls to the reviewer's direct messages with a link to the session thread, routes the response back to the original session, and posts `Waiting on approval from @reviewer…` in that thread without exposing the tool input. Add the `im:write` bot scope. By default eve targets the Slack user who triggered the turn, or provide `reviewer` to resolve another user:
+Set `approvalChannel` to choose where each tool approval appears. Return `"direct-message"` when the tool input must be visible only to the Slack user who triggered the turn, or `"thread"` for the normal shared-thread approval. Direct-message approvals start with a forwarded-message preview of the session thread, route the response back to the original session, and post `Waiting on approval from @reviewer…` in that thread without exposing the tool input. Add the `im:write` bot scope.
 
 ```ts title="agent/channels/slack.ts"
 import { slackChannel } from "eve/channels/slack";
 
 export default slackChannel({
-  privateToolApprovals: {
-    when: (request) => request.action.toolName === "review_answer",
-    reviewer: (_request, ctx) =>
-      String(ctx.session.auth.current?.attributes.reviewerUserId ?? "") || null,
-  },
+  approvalChannel: (request) =>
+    request.action.toolName === "review_answer" ? "direct-message" : "thread",
 });
 ```
 
-By default this setting applies to every tool approval on the channel; use `when` to select specific tools. Nonmatching approvals, questions, and session-limit prompts remain in the session thread. When `reviewer` is omitted, eve uses the Slack user who triggered the turn. Returning `null` from an authored resolver, or failing to resolve the triggering user, logs the undelivered request and posts no fallback, so private approval fails closed. The existing `onInputResponse` or tool approval response policy still decides whether the person who clicks may approve.
+The callback receives the approval `InputRequest` and current `SessionContext`. Omit it to keep every approval in the thread, or return `"direct-message"` unconditionally to make every tool approval private. Questions and session-limit prompts always remain in the session thread. If eve cannot resolve the triggering Slack user for a direct message, it logs the undelivered request and posts no fallback, so private approval fails closed. The existing `onInputResponse` or tool approval response policy still decides whether the person who clicks may approve.
 
 Authorization prompts split public status from private credentials. A sign-in challenge (OAuth URL, device code) is a credential. Anyone who completes it binds their identity to the session's connection. The default `authorization.required` handler posts a public, link-free status in the thread, delivers the actual challenge ephemerally to the triggering user, device code included, and then updates that public status when `authorization.completed` fires. The handler receives a private-delivery context with `postEphemeral`, `postDirectMessage` (needs the `im:write` scope), and `state`. There is, intentionally, no public `post` and no raw API access.
 

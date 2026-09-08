@@ -79,29 +79,28 @@ function authRequiredEvent(
 }
 
 describe("defaultInputRequestedHandler private tool approvals", () => {
-  it("keeps nonmatching approvals in the public thread", async () => {
+  it("uses the authored destination for a tool approval", async () => {
     const { channel, post, postDirectMessage } = buildChannelStub();
+    const approvalChannel = vi.fn(() => "thread" as const);
 
-    await defaultInputRequestedHandler({
-      when: () => false,
-    })(
+    await defaultInputRequestedHandler(approvalChannel)(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
       channel,
       sessionCtx,
     );
 
+    expect(approvalChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: "approval-1" }),
+      sessionCtx,
+    );
     expect(post).toHaveBeenCalled();
     expect(postDirectMessage).not.toHaveBeenCalled();
   });
 
-  it("fails closed when an authored reviewer resolver returns null", async () => {
-    const { channel, post, postDirectMessage, postEphemeral } = buildChannelStub({
-      triggeringUserId: "U_TRIGGER",
-    });
+  it("fails closed when no direct-message reviewer can be resolved", async () => {
+    const { channel, post, postDirectMessage, postEphemeral } = buildChannelStub();
 
-    await defaultInputRequestedHandler({
-      reviewer: () => null,
-    })(
+    await defaultInputRequestedHandler(() => "direct-message")(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
       channel,
       sessionCtx,
@@ -113,24 +112,26 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
   });
 
   it("links a routed DM approval to its thread status and updates it after settlement", async () => {
-    const { channel, post, postDirectMessage, request } = buildChannelStub();
+    const { channel, post, postDirectMessage, request } = buildChannelStub({
+      triggeringUserId: "U_REVIEWER",
+    });
 
-    await defaultInputRequestedHandler({
-      reviewer: () => "U_REVIEWER",
-    })(
+    await defaultInputRequestedHandler(() => "direct-message")(
       { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
       channel,
       sessionCtx,
     );
 
     expect(post).toHaveBeenCalledWith("Waiting on approval from <@U_REVIEWER>…");
-    expect(postDirectMessage).toHaveBeenCalledTimes(2);
+    expect(postDirectMessage).toHaveBeenCalledTimes(3);
     expect(postDirectMessage.mock.calls.every(([userId]) => userId === "U_REVIEWER")).toBe(true);
-    const rendered = JSON.stringify(postDirectMessage.mock.calls);
-    expect(rendered).toContain("private draft");
-    expect(rendered).toContain("eve_input:route:C123:111.222:tool-approval:approval-1");
-    expect(rendered).toContain(
-      "https://slack.com/archives/C123/pts1?thread_ts=111.222&cid=C123|View thread",
+    expect(postDirectMessage.mock.calls[0]).toEqual([
+      "U_REVIEWER",
+      "https://slack.com/archives/C123/pts1?thread_ts=111.222&cid=C123",
+    ]);
+    expect(JSON.stringify(postDirectMessage.mock.calls[1])).toContain("private draft");
+    expect(JSON.stringify(postDirectMessage.mock.calls[2])).toContain(
+      "eve_input:route:C123:111.222:tool-approval:approval-1",
     );
     expect(channel.state.pendingApprovalCards?.["approval-1"]?.messageChannelId).toBe("D123");
 
@@ -155,7 +156,6 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
       blocks?: unknown[];
     };
     expect(JSON.stringify(update.blocks)).not.toContain("eve_input:route:");
-    expect(JSON.stringify(update.blocks)).toContain("View thread");
   });
 });
 

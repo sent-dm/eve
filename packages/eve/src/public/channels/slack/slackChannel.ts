@@ -610,24 +610,27 @@ export interface SlackChannelInternalEvents extends Omit<
   readonly "authorization.required"?: SlackEventHandler<"authorization.required">;
 }
 
+export type SlackApprovalChannel = "direct-message" | "thread";
+
+/** Tool-approval request passed to a {@link SlackApprovalChannelResolver}. */
+export type SlackApprovalRequest = InputRequest & { readonly kind: "tool-approval" };
+
+/** Chooses the Slack destination for one tool-approval request. */
+export type SlackApprovalChannelResolver = (
+  request: SlackApprovalRequest,
+  ctx: SessionContext,
+) => SlackApprovalChannel | Promise<SlackApprovalChannel>;
+
 export interface SlackChannelConfig {
   readonly credentials?: SlackChannelCredentials;
   readonly botName?: string;
 
   /**
-   * Delivers tool-approval previews and controls by direct message to one Slack reviewer.
-   * The session thread names the reviewer without exposing the tool input. Questions and
-   * session-limit prompts retain the normal thread rendering.
+   * Chooses where each tool approval is delivered. Direct-message approvals go to the
+   * Slack user who triggered the active turn; the session thread names that reviewer
+   * without exposing the tool input. Defaults to `"thread"` when omitted.
    */
-  readonly privateToolApprovals?: {
-    /** Limits private delivery to matching approvals. Defaults to every tool approval. */
-    readonly when?: (request: InputRequest, ctx: SessionContext) => boolean | Promise<boolean>;
-    /** Defaults to the Slack user who triggered the active turn. */
-    readonly reviewer?: (
-      request: InputRequest,
-      ctx: SessionContext,
-    ) => string | null | Promise<string | null>;
-  };
+  readonly approvalChannel?: SlackApprovalChannelResolver;
 
   /** Optional presentation-only activity rendered without starting parent turns. */
   readonly activity?: {
@@ -899,8 +902,7 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
     "actions.requested": actionsHandler,
     "message.completed": messageCompletedHandler,
     "input.requested":
-      config.events?.["input.requested"] ??
-      defaultInputRequestedHandler(config.privateToolApprovals),
+      config.events?.["input.requested"] ?? defaultInputRequestedHandler(config.approvalChannel),
     "authorization.required":
       authorizationRequiredOverride === undefined
         ? defaultEvents["authorization.required"]

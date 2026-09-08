@@ -23,7 +23,8 @@ import {
   truncateTypingStatus,
 } from "#public/channels/slack/limits.js";
 import type {
-  SlackChannelConfig,
+  SlackApprovalChannelResolver,
+  SlackApprovalRequest,
   SlackChannelEvents,
   SlackChannelInternalEvents,
   SlackChannelState,
@@ -210,28 +211,30 @@ function firstNonEmptyLine(text: string): string | undefined {
  * Slack's 50-block message cap. Override by declaring
  * `events["input.requested"]`.
  */
+function isSlackApprovalRequest(request: InputRequest): request is SlackApprovalRequest {
+  return request.kind === "tool-approval";
+}
+
 export function defaultInputRequestedHandler(
-  privateToolApprovals?: SlackChannelConfig["privateToolApprovals"],
+  approvalChannel?: SlackApprovalChannelResolver,
 ): NonNullable<SlackChannelEvents["input.requested"]> {
   return async (data, channel, ctx) => {
-    const privateApprovals: InputRequest[] = [];
-    const publicRequests: InputRequest[] = [];
+    const directMessageApprovals: InputRequest[] = [];
+    const threadRequests: InputRequest[] = [];
     for (const request of data.requests) {
-      const privateDelivery =
-        privateToolApprovals !== undefined &&
-        request.kind === "tool-approval" &&
-        (privateToolApprovals.when === undefined ||
-          (await privateToolApprovals.when(request, ctx)));
-      (privateDelivery ? privateApprovals : publicRequests).push(request);
+      const destination =
+        isSlackApprovalRequest(request) && approvalChannel !== undefined
+          ? await approvalChannel(request, ctx)
+          : "thread";
+      (destination === "direct-message" ? directMessageApprovals : threadRequests).push(request);
     }
 
-    await postPublicInputRequests(publicRequests, channel);
-    for (const request of privateApprovals) {
-      const reviewer = privateToolApprovals?.reviewer
-        ? await privateToolApprovals.reviewer(request, ctx)
-        : (slackUserIdFromAuthContext(ctx.session.auth.current) ?? channel.state.triggeringUserId);
+    await postPublicInputRequests(threadRequests, channel);
+    for (const request of directMessageApprovals) {
+      const reviewer =
+        slackUserIdFromAuthContext(ctx.session.auth.current) ?? channel.state.triggeringUserId;
       if (!reviewer) {
-        log.warn("private tool approval not delivered because no reviewer was resolved", {
+        log.warn("direct-message tool approval not delivered because no reviewer was resolved", {
           requestId: request.requestId,
           sessionId: ctx.session.id,
         });
@@ -273,21 +276,15 @@ async function postPrivateToolApproval(input: {
     threadTs: input.channel.slack.threadTs,
   };
   const post = input.channel.thread.postDirectMessage.bind(input.channel.thread, input.reviewer);
+  const threadUrl = slackThreadUrl({ ...route, messageTs: input.statusMessageTs });
+  if (threadUrl !== undefined) {
+    // A standalone Slack message permalink renders as Slack's native forwarded-message preview.
+    await post(threadUrl);
+  }
   if (parts.details !== undefined) {
     await post({ blocks: routeHitlBlocks(parts.details.blocks, route), text: parts.details.text });
   }
-  const threadUrl = slackThreadUrl({ ...route, messageTs: input.statusMessageTs });
-  const controlBlocks = [
-    ...routeHitlBlocks(parts.controls.blocks, route),
-    ...(threadUrl === undefined
-      ? []
-      : [
-          {
-            elements: [{ text: `<${threadUrl}|View thread>`, type: "mrkdwn" }],
-            type: "context",
-          },
-        ]),
-  ];
+  const controlBlocks = routeHitlBlocks(parts.controls.blocks, route);
   const message = await post({ blocks: controlBlocks, text: parts.controls.text });
   recordApprovalCards(input.channel.state, [input.request], {
     messageBlocks: controlBlocks,
