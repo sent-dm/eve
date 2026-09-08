@@ -1,6 +1,6 @@
 import type { SessionAuthContext } from "#channel/types.js";
 
-import { createLogger, extractErrorId, formatErrorHint } from "#internal/logging.js";
+import { createLogger, extractErrorId, formatErrorHint, logError } from "#internal/logging.js";
 import { describeActionRequests } from "#public/channels/slack/action-status.js";
 import { buildSlackAuthContext, slackUserIdFromAuthContext } from "#public/channels/slack/auth.js";
 import {
@@ -235,13 +235,21 @@ export function defaultInputRequestedHandler(
         });
         continue;
       }
-      await deliverPrivateToolApproval({
-        channel,
+      const card = await deliverPrivateToolApproval({
         previewMessageTs: channel.state.triggeringMessageTs ?? channel.slack.threadTs,
         request,
         reviewer,
+        slack: channel.slack,
       });
-      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
+      recordApprovalCards(channel.state, [request], card);
+      try {
+        await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
+      } catch (error) {
+        logError(log, "failed to announce private tool approval", error, {
+          requestId: request.requestId,
+          sessionId: ctx.session.id,
+        });
+      }
     }
   };
 }

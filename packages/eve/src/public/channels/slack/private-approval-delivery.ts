@@ -1,17 +1,19 @@
 import { createLogger, logError } from "#internal/logging.js";
+import type { SlackHandle } from "#public/channels/slack/api.js";
 import { renderInputRequestPostParts, type SlackHitlRoute } from "#public/channels/slack/hitl.js";
-import type { SlackEventContext } from "#public/channels/slack/slackChannel.js";
+import type { SlackPendingApprovalCard } from "#public/channels/slack/slackChannel.js";
 import type { InputRequest } from "#shared/input.js";
 
 const log = createLogger("slack.private-approval-delivery");
+type PrivateApprovalSlack = Pick<SlackHandle, "channelId" | "request" | "threadTs">;
 
 export async function deliverPrivateToolApproval(input: {
-  readonly channel: SlackEventContext;
   readonly previewMessageTs: string;
   readonly request: InputRequest;
   readonly reviewer: string;
-}): Promise<void> {
-  const open = await input.channel.slack.request("conversations.open", { users: input.reviewer });
+  readonly slack: PrivateApprovalSlack;
+}): Promise<SlackPendingApprovalCard> {
+  const open = await input.slack.request("conversations.open", { users: input.reviewer });
   const messageChannelId =
     open.ok === true ? (open.channel as { id?: unknown } | undefined)?.id : undefined;
   if (typeof messageChannelId !== "string" || messageChannelId.length === 0) {
@@ -19,17 +21,17 @@ export async function deliverPrivateToolApproval(input: {
   }
 
   const route: SlackHitlRoute = {
-    channelId: input.channel.slack.channelId,
-    threadTs: input.channel.slack.threadTs,
+    channelId: input.slack.channelId,
+    threadTs: input.slack.threadTs,
   };
   const parts = renderInputRequestPostParts(input.request, route);
   const postedMessageIds: string[] = [];
 
   try {
-    const permalink = await resolveMessagePermalink(input.channel, input.previewMessageTs);
+    const permalink = await resolveMessagePermalink(input.slack, input.previewMessageTs);
     if (permalink !== undefined) {
       postedMessageIds.push(
-        await postMessage(input.channel, {
+        await postMessage(input.slack, {
           channel: messageChannelId,
           markdown_text: permalink,
           unfurl_links: true,
@@ -39,7 +41,7 @@ export async function deliverPrivateToolApproval(input: {
     }
     if (parts.details !== undefined) {
       postedMessageIds.push(
-        await postMessage(input.channel, {
+        await postMessage(input.slack, {
           blocks: parts.details.blocks,
           channel: messageChannelId,
           text: parts.details.text,
@@ -48,7 +50,7 @@ export async function deliverPrivateToolApproval(input: {
         }),
       );
     }
-    const messageTs = await postMessage(input.channel, {
+    const messageTs = await postMessage(input.slack, {
       blocks: parts.controls.blocks,
       channel: messageChannelId,
       text: parts.controls.text,
@@ -56,19 +58,12 @@ export async function deliverPrivateToolApproval(input: {
       unfurl_media: false,
     });
     postedMessageIds.push(messageTs);
-    input.channel.state.pendingApprovalCards = {
-      ...input.channel.state.pendingApprovalCards,
-      [input.request.requestId]: {
-        messageBlocks: parts.controls.blocks,
-        messageChannelId,
-        messageTs,
-      },
-    };
+    return { messageBlocks: parts.controls.blocks, messageChannelId, messageTs };
   } catch (error) {
     await Promise.allSettled(
       postedMessageIds.map(async (ts) => {
         try {
-          await input.channel.slack.request("chat.delete", { channel: messageChannelId, ts });
+          await input.slack.request("chat.delete", { channel: messageChannelId, ts });
         } catch (cleanupError) {
           logError(log, "failed to roll back partial private approval delivery", cleanupError, {
             channelId: messageChannelId,
@@ -82,12 +77,12 @@ export async function deliverPrivateToolApproval(input: {
 }
 
 async function resolveMessagePermalink(
-  channel: SlackEventContext,
+  slack: Pick<SlackHandle, "channelId" | "request">,
   messageTs: string,
 ): Promise<string | undefined> {
-  if (!channel.slack.channelId || !messageTs) return undefined;
-  const response = await channel.slack.request("chat.getPermalink", {
-    channel: channel.slack.channelId,
+  if (!slack.channelId || !messageTs) return undefined;
+  const response = await slack.request("chat.getPermalink", {
+    channel: slack.channelId,
     message_ts: messageTs,
   });
   return response.ok === true && typeof response.permalink === "string"
@@ -96,10 +91,10 @@ async function resolveMessagePermalink(
 }
 
 async function postMessage(
-  channel: SlackEventContext,
+  slack: Pick<SlackHandle, "request">,
   body: Record<string, unknown>,
 ): Promise<string> {
-  const response = await channel.slack.request("chat.postMessage", body);
+  const response = await slack.request("chat.postMessage", body);
   if (response.ok !== true || typeof response.ts !== "string" || response.ts.length === 0) {
     throw new Error(`Slack chat.postMessage failed: ${response.error ?? "unknown_error"}`);
   }

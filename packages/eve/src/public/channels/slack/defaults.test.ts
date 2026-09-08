@@ -159,6 +159,30 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     expect(channel.state.pendingApprovalCards).toBeUndefined();
   });
 
+  it("keeps the actionable DM committed when its thread announcement fails", async () => {
+    const { channel, post, request } = buildChannelStub({
+      triggeringMessageTs: "111.333",
+      triggeringUserId: "U_REVIEWER",
+    });
+    post.mockRejectedValueOnce(new Error("thread unavailable"));
+
+    await expect(
+      defaultInputRequestedHandler(() => "direct-message")(
+        { requests: [approvalRequest()], sequence: 1, stepIndex: 0, turnId: "turn-1" },
+        channel,
+        sessionCtx,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(
+      request.mock.calls.filter(([operation]) => operation === "chat.postMessage"),
+    ).toHaveLength(3);
+    expect(channel.state.pendingApprovalCards?.["approval-1"]).toMatchObject({
+      messageChannelId: "D123",
+      messageTs: "dm3",
+    });
+  });
+
   it("previews the triggering message and updates the routed DM card after settlement", async () => {
     const { channel, post, postDirectMessage, request } = buildChannelStub({
       triggeringMessageTs: "111.333",
