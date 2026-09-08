@@ -14,7 +14,9 @@ function respond(request: MockModelRequest): MockModelResponse | string {
       .find(
         (entry) =>
           entry.includes("BACKGROUND-EXPORT-") || /^(?:Background task|Export) task_/u.test(entry),
-      ) ?? "";
+      ) ??
+    request.userMessages.at(-1) ??
+    "";
 
   if (request.userMessages.some((entry) => entry.includes(SCHEDULED))) {
     return respondScheduled(request);
