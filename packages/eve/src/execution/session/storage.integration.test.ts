@@ -47,7 +47,7 @@ describe("session storage through native independent workflow contributors", () 
       const resources = await sessionDirectory.resolveHolder(holder.runId);
       expect(resources.holderRunId).toBe(holder.runId);
       expect(resources.control.ownerRunId).toBe(holder.runId);
-      expect(await sessionSnapshots.latest(resources.snapshots)).toBeUndefined();
+      expect((await sessionSnapshots.open(resources.snapshots)).latest).toBeUndefined();
 
       const descriptor = holder
         .getReadable<SessionResources>({ namespace: "eve.session.resources" })
@@ -99,12 +99,11 @@ describe("session storage through native independent workflow contributors", () 
         data: { message: "second", turnId: second.runId, sequence: 1 },
       });
 
-      const old = await sessionSnapshots.read<SessionStorageFixtureCheckpoint>(
-        firstResult.checkpoint,
-      );
-      const latest = await sessionSnapshots.latest<SessionStorageFixtureCheckpoint>(
+      const snapshots = await sessionSnapshots.open<SessionStorageFixtureCheckpoint>(
         resources.snapshots,
       );
+      const old = await snapshots.read(firstResult.checkpoint);
+      const latest = snapshots.latest;
       expect(old.markers).toEqual(["first"]);
       expect(latest?.ref).toEqual(secondResult.checkpoint);
       expect(latest?.checkpoint.markers).toEqual(["first", "second"]);
@@ -140,6 +139,9 @@ describe("session storage through native independent workflow contributors", () 
       const closer = await start(sessionStorageCloseFixtureWorkflow, [holder.runId], { world });
       await closer.returnValue;
       expect((await end).done).toBe(true);
+      expect((await sessionSnapshots.open(resources.snapshots)).latest?.ref).toEqual(
+        secondResult.checkpoint,
+      );
       expect(await holder.status).toBe("running");
       expect(await sessionDirectory.resolveHolder(holder.runId)).toEqual(resources);
       const closedStreams = await Promise.all(

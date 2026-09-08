@@ -33,6 +33,7 @@ describe("ordinary turn storage budget", () => {
         vi.spyOn(world.streams, "get"),
         vi.spyOn(world.streams, "getInfo"),
         vi.spyOn(world.streams, "write"),
+        vi.spyOn(world.streams, "writeMulti"),
         vi.spyOn(world.streams, "close"),
       ];
       const methods = [
@@ -40,6 +41,7 @@ describe("ordinary turn storage budget", () => {
         "streams.get",
         "streams.getInfo",
         "streams.write",
+        "streams.writeMulti",
         "streams.close",
       ];
       try {
@@ -67,7 +69,7 @@ describe("ordinary turn storage budget", () => {
           expect(events.filter((event) => event.type === "step.completed")).toHaveLength(1);
           expect(events.at(-1)?.type).toBe("session.waiting");
           expect(Object.values(calls).reduce((sum, count) => sum + count, 0)).toBeLessThanOrEqual(
-            19,
+            14,
           );
         }
         return samples;

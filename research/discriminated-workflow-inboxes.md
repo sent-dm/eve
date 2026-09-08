@@ -161,8 +161,8 @@ interface SessionEvents {
 }
 
 interface SessionSnapshots {
+  initialize(ref: SnapshotStreamRef): Promise<void>;
   open(ref: SnapshotStreamRef): Promise<SnapshotLog>;
-  read(ref: SnapshotRecordRef): Promise<SessionCheckpoint>;
   close(ref: SnapshotStreamRef): Promise<void>;
 }
 
@@ -229,8 +229,13 @@ Subsequent execution and finalization steps use `read(recordRef)` to restore tha
 not a moving stream tail. These records live in the snapshot storage already held
 by the session. No additional holder state or workflow is needed for step handoff.
 The adapter uses one append-only snapshot stream, with each serialized record at
-an exact chunk index. It creates neither a pointer index nor a separate stream per
-record. A run ID or stream ID alone cannot identify a particular checkpoint.
+an exact chunk index embedded in its immutable envelope. Initialization writes
+index zero; each exclusive writer advances the index after its append persists.
+Opening the log reads its last record with `startIndex: -1`, obtaining state and
+position together without a separate tail-index request. Exact reads verify that
+the envelope index matches the requested reference. It creates neither a pointer
+index nor a separate stream per record. A run ID or stream ID alone cannot
+identify a particular checkpoint.
 Immutable records may use a bounded cache by record reference within the storage
 scope. Hydrating a mutable working state must not mutate the cached record.
 
@@ -607,19 +612,43 @@ latency and cross-deployment consistency remain implementation gates.
 The native warm-turn integration test measures holder storage operations through
 the World API, including run metadata. Against the same SDK and isolated baseline
 commit, replacing the pointer/per-record snapshot layout with one log reduced
-these calls from 52 to 19 per turn:
+these calls from 53 to 20 per turn. Direct last-record reads then removed two
+tail probes. The counter includes both single and batched stream writes:
 
-| Operation           | Baseline | Single snapshot log |
-| ------------------- | -------: | ------------------: |
-| Run metadata read   |       17 |                   8 |
-| Stream payload read |        7 |                   2 |
-| Stream tail read    |       13 |                   2 |
-| Stream write        |       11 |                   7 |
-| Stream close        |        4 |                   0 |
+| Operation            | Baseline | Single snapshot log |
+| -------------------- | -------: | ------------------: |
+| Run metadata read    |       17 |                   8 |
+| Stream payload read  |        7 |                   2 |
+| Stream tail read     |       13 |                   2 |
+| Stream write         |       11 |                   7 |
+| Batched stream write |        1 |                   1 |
+| Stream close         |        4 |                   0 |
 
-Three local warm turns took 308/548/344 ms at the baseline and 229/225/227 ms with
-the log. These small local samples establish operation counts, not hosted latency.
-The CI stress report separately records client latency and native run/step timing.
+With direct last-record reads and the per-Run immutable stream-target SDK cache,
+the same test measures 14 calls: four metadata reads, two payload reads, seven
+single writes, one batched write, and no tail probes or closes. The cache's
+encryption and freshness boundaries are documented in [patch maintenance](../patches/README.md).
+
+These small local samples establish operation counts, not hosted latency. Repeated
+local runs showed similar roughly 220 ms client times despite the lower call count;
+local storage does not reproduce hosted round-trip cost. Earlier counts omitted
+the batched write and have been corrected here and in the test.
+
+Hosted observations of the same deterministic fixture, each with 99 warm turns:
+
+| Checkpoint                                                                                                | Warm p50 | Warm p95 | Execute p50 | Finalize p50 | Forwarded owners |
+| --------------------------------------------------------------------------------------------------------- | -------: | -------: | ----------: | -----------: | ---------------: |
+| [Original holder implementation](https://github.com/vercel/eve/actions/runs/34251207503/job/102145853245) | 3,326 ms | 4,154 ms |    1,355 ms |     1,173 ms |            90/99 |
+| [Success-abort cleanup](https://github.com/vercel/eve/actions/runs/34255378675/job/102159913084)          | 3,535 ms | 4,717 ms |    1,396 ms |     1,233 ms |            93/99 |
+| [Single snapshot log](https://github.com/vercel/eve/actions/runs/34256959236/job/102165400250)            | 1,593 ms | 2,275 ms |      560 ms |       488 ms |             7/99 |
+
+The log checkpoint passed both sequential and concurrent stress scenarios. These
+are separate hosted observations, not interleaved trials. The abort cleanup
+shortened the native completion tail but did not improve client latency. The log
+removed the dominant storage overhead; the subsecond target is still unmet.
+The CI report retains raw client samples and native run/step timings, including
+partial reports when a scenario fails. Event timestamps mark event construction,
+not persistence or client receipt.
 
 ## One logical inbox per receiving owner
 

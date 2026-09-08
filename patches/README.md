@@ -28,3 +28,30 @@ release containing the API and reader fixes, then regenerate the lockfile and
 compiled output. The native storage test covers encrypted contributors appending,
 restoring snapshots, and releasing or closing shared streams. The session lifecycle
 integration suites exercise unencrypted storage.
+
+### Local amendment for upstream: cache immutable stream ownership
+
+The patch also contains an eve-authored SDK optimization that needs upstream review.
+`Run#getReadable()` already resolves owner metadata for decryption, but previously
+discarded it; each subsequent `getWritable()` fetched the same owner again. A
+snapshot read followed by its attempt and commit writes needed three metadata
+requests on one `Run` instance.
+
+The amendment caches only `runId`, `deploymentId`, and `encryptionPublicKey` per
+instance. Readers seed that cache from their in-flight metadata lookup, and writers
+reuse it. Forwarded write keys are cached separately: public-key writers remain
+write-only and never request private read keys. Failed target or write-key lookups
+clear the corresponding new cache so an explicit retry can recover.
+
+Status, existence, timestamps, and return-value status reads stay fresh. The read-key
+callback still receives its full `WorkflowRun`; a read following a completed
+write-only lookup may therefore need another metadata request. Cache contents stay
+out of serialized `Run` values. Each instance retains its existing World lifetime;
+this does not add support for replacing the global World while reusing an old run.
+
+Run the [patch regression tests](./tests/README.md) against the installed SDK.
+They exercise real serialization and encryption with a controlled World transport,
+including concurrent access, failed lookups, fresh status, namespaces, durability
+promises, and cache isolation. The original upstream writer suite also passed in
+the isolated patch build. Retain or re-evaluate this amendment when upgrading;
+the upstream writer API alone does not include it.

@@ -218,7 +218,7 @@ describe("session snapshots", () => {
       writers: nativeWriterAcquisitions,
       runs: runtime.getRun.mock.calls.length,
     }).toEqual({
-      tailReads: 2,
+      tailReads: 0,
       reads: 2,
       writes: 4,
       closes: 0,
@@ -231,9 +231,30 @@ describe("session snapshots", () => {
     const { snapshots } = createSessionResources("holder", "first");
     await sessionSnapshots.initialize(snapshots);
     await sessionSnapshots.initialize(snapshots);
-    await expect(sessionSnapshots.latest(snapshots)).resolves.toBeUndefined();
+    expect((await sessionSnapshots.open(snapshots)).latest).toBeUndefined();
     expect(stored(snapshots.id).chunks).toHaveLength(1);
     expect(cancellations).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { kind: "initialized", index: 1 },
+    { kind: "record", index: 0, checkpoint: { writeId: "invalid" } },
+    { kind: "record", index: 1.5, checkpoint: { writeId: "invalid" } },
+    { kind: "unknown", index: 1 },
+  ])("rejects an invalid snapshot tail envelope: $kind at $index", async (entry) => {
+    const { snapshots } = createSessionResources("holder", "first");
+    stored(snapshots.id).chunks.push(entry);
+    await expect(sessionSnapshots.open(snapshots)).rejects.toThrow("invalid record index");
+  });
+
+  it("rejects a historical record whose embedded index does not match its reference", async () => {
+    const { snapshots } = createSessionResources("holder", "first");
+    await sessionSnapshots.initialize(snapshots);
+    const log = await sessionSnapshots.open(snapshots);
+    const first = await log.append({ writeId: "first" });
+    await log.append({ writeId: "second" });
+    stored(snapshots.id).chunks[1] = { kind: "record", index: 2, checkpoint: { writeId: "wrong" } };
+    await expect(log.read(first)).rejects.toThrow("does not match its reference");
   });
 
   it("keeps exact records in one open stream as later checkpoints become latest", async () => {
@@ -252,8 +273,7 @@ describe("session snapshots", () => {
     expect(first).toEqual({ streamId: snapshots.id, index: 1 });
     expect(second).toEqual({ streamId: snapshots.id, index: 2 });
     expect(await log.read(first)).toEqual(initial);
-    expect(await sessionSnapshots.read(first)).toEqual(initial);
-    expect((await sessionSnapshots.latest(snapshots))?.ref).toEqual(second);
+    expect((await sessionSnapshots.open(snapshots)).latest?.ref).toEqual(second);
     expect(await log.append(next)).toEqual(second);
     expect(stored(snapshots.id).chunks).toHaveLength(3);
     expect(stored(snapshots.id).closed).toBe(false);
@@ -272,8 +292,8 @@ describe("session snapshots", () => {
     checkpoint.history.push("uncommitted");
     await expect(log.append(checkpoint)).rejects.toThrow("different state");
     expect(
-      (await sessionSnapshots.latest<{ writeId: string; history: string[] }>(snapshots))?.checkpoint
-        .history,
+      (await sessionSnapshots.open<{ writeId: string; history: string[] }>(snapshots)).latest
+        ?.checkpoint.history,
     ).toEqual(["accepted"]);
   });
 

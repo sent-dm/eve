@@ -893,7 +893,8 @@ describe("turn cancellation integration", () => {
         });
         expect((await stream.nextTurn()).at(-1)?.type).toBe("session.waiting");
 
-        const stored = await sessionSnapshots.latest<SessionCheckpoint>(run.resources.snapshots);
+        const stored = (await sessionSnapshots.open<SessionCheckpoint>(run.resources.snapshots))
+          .latest;
         if (stored === undefined) throw new Error("Expected a settled checkpoint.");
         await waitForTurnReceipt(stored.checkpoint.writerRunId);
         expect(await getHookByToken(activeTurnToken(run.sessionId)).catch(() => null)).toBeNull();

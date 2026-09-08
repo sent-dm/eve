@@ -7,8 +7,8 @@ interface SnapshotWrite {
 }
 
 type SnapshotEntry<Checkpoint> =
-  | { readonly kind: "initialized" }
-  | { readonly kind: "record"; readonly checkpoint: Checkpoint };
+  | { readonly kind: "initialized"; readonly index: 0 }
+  | { readonly kind: "record"; readonly index: number; readonly checkpoint: Checkpoint };
 
 export interface StoredSnapshot<Checkpoint> {
   readonly ref: SnapshotRecordRef;
@@ -28,8 +28,26 @@ function validateRecordRef(ref: SnapshotRecordRef): void {
   }
 }
 
-function checkpointFromEntry<Checkpoint>(entry: SnapshotEntry<Checkpoint>): Checkpoint {
+function validateEntry<Checkpoint>(entry: SnapshotEntry<Checkpoint>): void {
+  if (
+    !Number.isSafeInteger(entry.index) ||
+    entry.index < 0 ||
+    (entry.kind === "initialized"
+      ? entry.index !== 0
+      : entry.kind !== "record" || entry.index === 0)
+  ) {
+    throw new Error("Session snapshot storage has an invalid record index.");
+  }
+}
+
+function checkpointFromEntry<Checkpoint>(
+  entry: SnapshotEntry<Checkpoint>,
+  index: number,
+): Checkpoint {
+  validateEntry(entry);
   if (entry.kind !== "record") throw new Error("Session snapshot record does not exist.");
+  if (entry.index !== index)
+    throw new Error("Session snapshot record index does not match its reference.");
   return entry.checkpoint;
 }
 
@@ -37,7 +55,7 @@ export const sessionSnapshots = {
   async initialize(ref: SnapshotStreamRef): Promise<void> {
     const storage = openStreamStorage(ref.id);
     if ((await storage.tailIndex()) === -1) {
-      await storage.append<SnapshotEntry<never>>([{ kind: "initialized" }]);
+      await storage.append<SnapshotEntry<never>>([{ kind: "initialized", index: 0 }]);
     }
   },
 
@@ -45,12 +63,9 @@ export const sessionSnapshots = {
     stream: SnapshotStreamRef,
   ): Promise<SnapshotLog<Checkpoint>> {
     const storage = openStreamStorage(stream.id);
-    let index = await storage.tailIndex();
-    if (index === -1) throw new Error("Session snapshot storage has not been initialized.");
-    const head = await storage.readRecord<SnapshotEntry<Checkpoint>>(index);
-    if (head.kind === "initialized" && index !== 0) {
-      throw new Error("Session snapshot storage has an invalid initialization record.");
-    }
+    const head = await storage.readRecord<SnapshotEntry<Checkpoint>>(-1);
+    validateEntry(head);
+    let index = head.index;
     let latest: StoredSnapshot<Checkpoint> | undefined =
       head.kind === "record"
         ? { ref: { streamId: stream.id, index }, checkpoint: head.checkpoint }
@@ -75,7 +90,10 @@ export const sessionSnapshots = {
         }
         return latest?.ref.index === ref.index
           ? latest.checkpoint
-          : checkpointFromEntry(await storage.readRecord<SnapshotEntry<Checkpoint>>(ref.index));
+          : checkpointFromEntry(
+              await storage.readRecord<SnapshotEntry<Checkpoint>>(ref.index),
+              ref.index,
+            );
       },
       async append(checkpoint) {
         assertAvailable();
@@ -90,6 +108,7 @@ export const sessionSnapshots = {
             // in-memory checkpoint since the original append.
             const stored = checkpointFromEntry(
               await storage.readRecord<SnapshotEntry<Checkpoint>>(latest.ref.index),
+              latest.ref.index,
             );
             if (!(await equalSnapshot(stored, checkpoint))) {
               throw new Error(
@@ -99,9 +118,12 @@ export const sessionSnapshots = {
             return latest.ref;
           }
           const ref: SnapshotRecordRef = { streamId: stream.id, index: index + 1 };
+          validateRecordRef(ref);
           try {
             // The SDK stores each serialized object as one indexed stream chunk.
-            await storage.append<SnapshotEntry<Checkpoint>>([{ kind: "record", checkpoint }]);
+            await storage.append<SnapshotEntry<Checkpoint>>([
+              { kind: "record", index: ref.index, checkpoint },
+            ]);
           } catch (error) {
             // A failed flush may already have committed. Only a fresh tail read
             // can establish which position the next writer owns.
@@ -117,19 +139,6 @@ export const sessionSnapshots = {
         }
       },
     };
-  },
-
-  async latest<Checkpoint extends SnapshotWrite>(
-    stream: SnapshotStreamRef,
-  ): Promise<StoredSnapshot<Checkpoint> | undefined> {
-    return (await sessionSnapshots.open<Checkpoint>(stream)).latest;
-  },
-
-  async read<Checkpoint>(ref: SnapshotRecordRef): Promise<Checkpoint> {
-    validateRecordRef(ref);
-    return checkpointFromEntry(
-      await openStreamStorage(ref.streamId).readRecord<SnapshotEntry<Checkpoint>>(ref.index),
-    );
   },
 
   close(ref: SnapshotStreamRef): Promise<void> {

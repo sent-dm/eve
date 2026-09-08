@@ -92,6 +92,9 @@ jobs:
       - name: Run unit tests
         run: pnpm test:unit
 
+      - name: Run Workflow SDK patch regression tests
+        run: packages/eve/node_modules/.bin/vitest run --config patches/tests/vitest.unit.config.ts
+
   test-integration:
     name: test-integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
