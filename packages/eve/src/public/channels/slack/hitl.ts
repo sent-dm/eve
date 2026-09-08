@@ -99,16 +99,16 @@ interface SlackHitlAction {
  * presentation metadata cannot cross the durable session-inbox boundary.
  */
 interface DerivedHitlResponse {
-  readonly kind?: "tool-approval";
-  readonly response: ValidatedInputResponse;
-  readonly route?: SlackHitlRoute;
+  kind?: "tool-approval";
+  response: ValidatedInputResponse;
+  route?: SlackHitlRoute;
 }
 
 interface DecodedHitlActionId {
-  readonly button: boolean;
-  readonly kind?: "tool-approval";
-  readonly requestId: string;
-  readonly route?: SlackHitlRoute;
+  button: boolean;
+  kind?: "tool-approval";
+  requestId: string;
+  route?: SlackHitlRoute;
 }
 
 /**
@@ -123,11 +123,12 @@ export function deriveHitlResponse(action: SlackHitlAction): DerivedHitlResponse
   if (decoded === null) return null;
   const optionId = action.selectedOptionValue ?? action.value;
   if (optionId === undefined || (action.value !== undefined && !decoded.button)) return null;
-  return {
-    ...(decoded.kind === undefined ? {} : { kind: decoded.kind }),
+  const derived: DerivedHitlResponse = {
     response: parseInputResponse({ optionId, requestId: decoded.requestId }),
-    ...(decoded.route === undefined ? {} : { route: decoded.route }),
   };
+  if (decoded.kind !== undefined) derived.kind = decoded.kind;
+  if (decoded.route !== undefined) derived.route = decoded.route;
+  return derived;
 }
 
 function splitEncodedRequest(value: string): {
@@ -166,12 +167,13 @@ export function decodeHitlActionId(actionId: string): DecodedHitlActionId | null
   const request = splitEncodedRequest(button?.groups?.requestId ?? encoded);
   if (!request.requestId) return null;
   const kind = button?.groups?.kind === "tool-approval" ? "tool-approval" : request.kind;
-  return {
+  const decoded: DecodedHitlActionId = {
     button: button !== null,
-    ...(kind === undefined ? {} : { kind }),
     requestId: request.requestId,
-    ...(route === undefined ? {} : { route }),
   };
+  if (kind !== undefined) decoded.kind = kind;
+  if (route !== undefined) decoded.route = route;
+  return decoded;
 }
 
 function encodeHitlActionId(request: InputRequest, route?: SlackHitlRoute): string {
