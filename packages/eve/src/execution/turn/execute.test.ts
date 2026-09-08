@@ -1,6 +1,7 @@
 import { admitSubmissions, splitSubmission } from "#execution/turn/submissions.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { executeTurnStep, projectProgress } from "#execution/turn/execute.js";
+import { setEveAttributes } from "#runtime/attributes/emit.js";
 import {
   createDurableSessionState,
   replaceDurableSessionSnapshot,
@@ -42,8 +43,10 @@ vi.mock("#execution/session/snapshots.js", () => ({
 vi.mock("#execution/session/directory.js", () => ({ publishSessionDescriptor: mocks.publish }));
 vi.mock("#execution/session/events.js", () => ({
   sessionEvents: {
-    withWriter: async (_ref: unknown, run: (stream: WritableStream<Uint8Array>) => unknown) =>
-      run(new WritableStream()),
+    open: () => ({
+      withWriter: async (run: (stream: WritableStream<Uint8Array>) => unknown) =>
+        run(new WritableStream()),
+    }),
   },
 }));
 vi.mock("#execution/session/create-state.js", () => ({ createSessionState: mocks.create }));
@@ -148,6 +151,44 @@ const run = (changes: Partial<Parameters<typeof executeTurnStep>[0]> = {}) =>
   });
 
 describe("turn execution boundary", () => {
+  it("starts attributes alongside the durable marker and joins both before model effects", async () => {
+    const attributes = Promise.withResolvers<void>();
+    const marker = Promise.withResolvers<void>();
+    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    mocks.append.mockImplementationOnce(async () => {
+      marker.resolve();
+      return { streamId: session.snapshots.id, index: 2 };
+    });
+    const result = run();
+    await marker.promise;
+    expect(setEveAttributes).toHaveBeenCalledOnce();
+    expect(mocks.model).not.toHaveBeenCalled();
+    attributes.resolve();
+    await result;
+    expect(mocks.model).toHaveBeenCalledOnce();
+  });
+
+  it("joins an in-flight attribute write when the entry marker fails", async () => {
+    const attributes = Promise.withResolvers<void>();
+    const marker = Promise.withResolvers<void>();
+    const failure = new Error("Marker write failed");
+    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    mocks.append.mockImplementationOnce(async () => {
+      marker.resolve();
+      throw failure;
+    });
+    let finished = false;
+    const result = run().catch((error: unknown) => {
+      finished = true;
+      return error;
+    });
+    await marker.promise;
+    expect(finished).toBe(false);
+    attributes.resolve();
+    expect(await result).toBe(failure);
+    expect(mocks.model).not.toHaveBeenCalled();
+  });
+
   it("publishes bootstrap readiness after its first durable checkpoint and before model effects", async () => {
     mocks.head.mockReturnValue(undefined);
     const result = await run({
@@ -248,6 +289,106 @@ describe("turn execution boundary", () => {
       deliveries: { cancel: "retired" },
       result: { action: "park" },
     });
+  });
+  it("accepts expiry of an idle session without inventing a cancelled model turn", async () => {
+    await run({ submission: { eventId: "expiry", command: { kind: "session-timeout" } } });
+    expect(mocks.model).not.toHaveBeenCalled();
+    expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
+      deliveries: { expiry: "applied" },
+      result: { action: "park" },
+      inputs: [],
+    });
+  });
+
+  it.each(["park", "continue"] as const)(
+    "does not let a duplicate submission change the model's %s decision",
+    async (action) => {
+      checkpoint = {
+        ...checkpoint,
+        phase: "running",
+        writerRunId: owner.ownerRunId,
+        deliveries: { [submission.eventId]: "applied" },
+        inputs: [],
+        result: {
+          action,
+          hasPendingAuthorization: false,
+          hasPendingInputBatch: false,
+          sessionState: checkpoint.state,
+          serializedContext: checkpoint.serializedContext,
+        },
+      };
+      const result = await run({
+        checkpoint: ref,
+        work: {
+          kind: "model",
+          envelopes: [
+            {
+              eventId: submission.eventId,
+              kind: "session.submit",
+              payload: { submission, candidateRunId: "concurrent-candidate" },
+            },
+          ],
+        },
+      });
+      expect(mocks.model).toHaveBeenCalledTimes(action === "continue" ? 1 : 0);
+      expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
+        deliveries: { [submission.eventId]: "applied" },
+        inputs: [],
+        result: { action },
+      });
+      expect(result).toMatchObject({
+        kind: "progress",
+        progress: { action: action === "continue" ? "continue" : "settle" },
+      });
+    },
+  );
+
+  it("advances the active step when steering replaces an unpublished settlement", async () => {
+    const emission = { sessionStarted: true, sequence: 2, stepIndex: 3, turnId: "turn_owner" };
+    const state = replaceDurableSessionSnapshot({
+      session: {
+        ...checkpoint.state.snapshot.session,
+        state: { "eve.harness.emission": emission },
+      },
+    });
+    checkpoint = {
+      ...checkpoint,
+      phase: "running",
+      writerRunId: owner.ownerRunId,
+      state,
+      inputs: [],
+      result: {
+        action: "park",
+        hasPendingAuthorization: false,
+        hasPendingInputBatch: false,
+        sessionState: state,
+        serializedContext: {},
+        settlement: {
+          events: [],
+          emissionAfter: { ...emission, sequence: 3, stepIndex: 0, turnId: "" },
+        },
+      },
+    };
+
+    await run({
+      checkpoint: ref,
+      work: {
+        kind: "model",
+        envelopes: [
+          {
+            kind: "session.submit",
+            eventId: submission.eventId,
+            payload: { submission, candidateRunId: "steering-candidate" },
+          },
+        ],
+      },
+    });
+    expect(mocks.model).toHaveBeenCalledOnce();
+    expect(mocks.model.mock.lastCall?.[0]).toMatchObject({
+      input: { kind: "deliver", payloads: [{ message: "Continue" }] },
+      sessionState: { emissionState: { ...emission, stepIndex: 4 } },
+    });
+    expect(mocks.append.mock.lastCall?.[0].result).not.toHaveProperty("settlement");
   });
 
   it("commits executor ownership before acknowledging blocking tools", async () => {

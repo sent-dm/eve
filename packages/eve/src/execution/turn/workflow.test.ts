@@ -195,21 +195,72 @@ describe("turn workflow ownership", () => {
     expect(inbox.dispose).toHaveBeenCalledOnce();
   });
 
-  it("reclaims after forwarding returns an unaccounted continuation receipt", async () => {
-    const first = testInbox().inbox;
-    vi.mocked(first.claim).mockResolvedValue({ kind: "conflict", runId: "old-owner" });
-    const second = testInbox().inbox;
-    mocks.createOwnerInbox.mockReturnValueOnce(first).mockReturnValueOnce(second);
-    mocks.forwardSubmissionStep.mockResolvedValue({
-      deliveries: {},
-      terminal: false,
-      continuedTo: "deferred-behind-candidate",
-    });
-    mocks.executeTurnStep.mockResolvedValue({ kind: "receipt", receipt });
-    await expect(turnWorkflow(input)).resolves.toEqual(receipt);
-    expect(mocks.createOwnerInbox).toHaveBeenCalledTimes(2);
-    expect(first.dispose).toHaveBeenCalledOnce();
-    expect(second.dispose).toHaveBeenCalledOnce();
+  it("remembers expiry across model boundaries without aborting the active turn", async () => {
+    const actor = testInbox();
+    const firstModel = deferred<TurnExecutionResult>();
+    mocks.createOwnerInbox.mockReturnValue(actor.inbox);
+    mocks.executeTurnStep.mockReturnValueOnce(firstModel.promise).mockResolvedValueOnce(progress());
+    const run = turnWorkflow(input);
+    await flush();
+    actor.push(submit({ kind: "session-timeout" }, "expiry"));
+    const signal = mocks.executeTurnStep.mock.calls[0]![0].abortSignal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    expect(mocks.finalizeTurnStep).not.toHaveBeenCalled();
+    firstModel.resolve(progress({ action: "continue" }));
+    await run;
+    expect(mocks.executeTurnStep).toHaveBeenCalledTimes(2);
+    expect(signal.aborted).toBe(false);
+    expect(mocks.finalizeTurnStep).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "timeout", eventIds: ["input", "expiry"], pending: [] }),
+    );
+  });
+
+  it("prepares cancellation after predecessor completion and reuses it across claim retries", async () => {
+    const NativeAbortController = globalThis.AbortController;
+    const controllers: AbortController[] = [];
+    vi.stubGlobal(
+      "AbortController",
+      class extends NativeAbortController {
+        constructor() {
+          super();
+          controllers.push(this);
+        }
+      },
+    );
+    try {
+      const previous = deferred<void>();
+      mocks.awaitTurnStep.mockReturnValue(previous.promise);
+      const first = testInbox().inbox;
+      const second = testInbox().inbox;
+      vi.mocked(first.claim).mockImplementation(async () => {
+        expect(controllers).toHaveLength(1);
+        expect(mocks.executeTurnStep).not.toHaveBeenCalled();
+        return { kind: "conflict", runId: "previous" };
+      });
+      vi.mocked(second.claim).mockImplementation(async () => {
+        expect(controllers).toHaveLength(1);
+        return { kind: "owned" };
+      });
+      mocks.createOwnerInbox.mockReturnValueOnce(first).mockReturnValueOnce(second);
+      mocks.forwardSubmissionStep.mockResolvedValue({
+        deliveries: {},
+        terminal: false,
+        continuedTo: "deferred-behind-candidate",
+      });
+      mocks.executeTurnStep.mockResolvedValue({ kind: "receipt", receipt });
+      const result = turnWorkflow({ ...input, afterRunId: "previous" });
+      await flush();
+      expect(controllers).toHaveLength(0);
+      previous.resolve();
+      await expect(result).resolves.toEqual(receipt);
+      expect(mocks.executeTurnStep.mock.calls[0]![0].abortSignal).toBe(controllers[0]!.signal);
+      expect(controllers[0]!.signal.aborted).toBe(false);
+      expect(mocks.createOwnerInbox).toHaveBeenCalledTimes(2);
+      expect(first.dispose).toHaveBeenCalledOnce();
+      expect(second.dispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("aborts targeted control but awaits model quiescence before finalization", async () => {

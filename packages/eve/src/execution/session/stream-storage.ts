@@ -3,10 +3,33 @@ import { decodeStreamLocation } from "#execution/session/stream-location.js";
 
 const READ_TIMEOUT_MS = 10_000;
 
-/** A contributor keeps owner resolution within its step, never in workflow history. */
-export function openStreamStorage(id: string) {
-  const { runId, namespace } = decodeStreamLocation(id);
-  const owner = getRun(runId);
+export type StreamStorage = ReturnType<typeof storageForOwner>;
+
+export interface StreamStorageScope {
+  open(id: string): StreamStorage;
+}
+
+/** Owner/key resolution lives only as long as the current step's scope. */
+export function createStreamStorageScope(): StreamStorageScope {
+  const owners = new Map<string, ReturnType<typeof getRun>>();
+  return {
+    open(id) {
+      const { runId, namespace } = decodeStreamLocation(id);
+      let owner = owners.get(runId);
+      if (owner === undefined) {
+        owner = getRun(runId);
+        owners.set(runId, owner);
+      }
+      return storageForOwner(owner, namespace);
+    },
+  };
+}
+
+export function openStreamStorage(id: string): StreamStorage {
+  return createStreamStorageScope().open(id);
+}
+
+function storageForOwner(owner: ReturnType<typeof getRun>, namespace?: string) {
   const read = <T>(startIndex?: number) => owner.getReadable<T>({ namespace, startIndex });
   const withWriter = async <T, Result>(
     run: (writable: WritableStream<T>) => Promise<Result>,
@@ -43,10 +66,6 @@ export function openStreamStorage(id: string) {
   };
 }
 
-export function readStream<T>(id: string, startIndex?: number) {
-  return openStreamStorage(id).read<T>(startIndex);
-}
-
 export function streamTailIndex(id: string): Promise<number> {
   return openStreamStorage(id).tailIndex();
 }
@@ -76,14 +95,6 @@ async function readRecord<T>(readable: ReadableStream<T>): Promise<T> {
     await reader.cancel();
     reader.releaseLock();
   }
-}
-
-/** Writes stay inside one step; releasing a contributor never closes the session stream. */
-export function withStreamWriter<T, Result>(
-  id: string,
-  run: (writable: WritableStream<T>) => Promise<Result>,
-): Promise<Result> {
-  return openStreamStorage(id).withWriter(run);
 }
 
 async function contribute<T, Result>(

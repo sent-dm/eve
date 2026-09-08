@@ -75,6 +75,28 @@ export type { HarnessEmissionState } from "#harness/emission-state.js";
 // Turn lifecycle helpers
 // ---------------------------------------------------------------------------
 
+/** Delivers steering within the active turn, or opens a new logical turn. */
+export async function emitTurnInput(
+  emitFn: HarnessEmitFn,
+  input: StepInput,
+  state: HarnessEmissionState,
+  runtimeIdentity?: RuntimeIdentity,
+  traceContext?: RuntimeTraceContext,
+): Promise<HarnessEmissionState> {
+  if (state.turnId === "")
+    return await emitTurnPreamble(emitFn, input, state, runtimeIdentity, traceContext);
+  if (input.message !== undefined) {
+    await emitFn(
+      createMessageReceivedEvent({
+        message: input.message,
+        sequence: state.sequence,
+        turnId: state.turnId,
+      }),
+    );
+  }
+  return state;
+}
+
 /**
  * Emits `session.started` (once), `turn.started`, and `message.received` at the
  * beginning of a new turn. Returns updated emission state.

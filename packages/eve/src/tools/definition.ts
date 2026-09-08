@@ -142,8 +142,8 @@ export type ToolContext = SessionContext & {
    * Aborts when the work this tool is doing is cancelled: the active turn
    * for an ordinary tool, the durable run for a workflow tool. In a workflow
    * body the signal is durable — it survives replay and steps that receive it
-   * observe the abort — and the run waits a grace period for the body to
-   * unwind through `finally` before it ends.
+   * observe the abort — and cancellation waits for the body and its awaited
+   * work to finish unwinding through `finally` before the run ends.
    */
   readonly abortSignal: AbortSignal;
   /**

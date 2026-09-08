@@ -629,6 +629,14 @@ the same test measures 14 calls: four metadata reads, two payload reads, seven
 single writes, one batched write, and no tail probes or closes. The cache's
 encryption and freshness boundaries are documented in [patch maintenance](../patches/README.md).
 
+An explicit storage scope now shares those Run instances across a step's event and
+snapshot adapters, reducing the count to 12: two metadata reads, two payload reads,
+seven single writes, and one batched write. The scope ends with the step and never
+enters workflow history. The turn also registers its ownership and cancellation
+hooks in the same activation, before awaiting the ownership claim. Attribute writes
+overlap independent checkpoint or settlement work and are joined before the step
+returns.
+
 These small local samples establish operation counts, not hosted latency. Repeated
 local runs showed similar roughly 220 ms client times despite the lower call count;
 local storage does not reproduce hosted round-trip cost. Earlier counts omitted
@@ -636,16 +644,19 @@ the batched write and have been corrected here and in the test.
 
 Hosted observations of the same deterministic fixture, each with 99 warm turns:
 
-| Checkpoint                                                                                                | Warm p50 | Warm p95 | Execute p50 | Finalize p50 | Forwarded owners |
-| --------------------------------------------------------------------------------------------------------- | -------: | -------: | ----------: | -----------: | ---------------: |
-| [Original holder implementation](https://github.com/vercel/eve/actions/runs/34251207503/job/102145853245) | 3,326 ms | 4,154 ms |    1,355 ms |     1,173 ms |            90/99 |
-| [Success-abort cleanup](https://github.com/vercel/eve/actions/runs/34255378675/job/102159913084)          | 3,535 ms | 4,717 ms |    1,396 ms |     1,233 ms |            93/99 |
-| [Single snapshot log](https://github.com/vercel/eve/actions/runs/34256959236/job/102165400250)            | 1,593 ms | 2,275 ms |      560 ms |       488 ms |             7/99 |
+| Checkpoint                                                                                                 | Warm p50 | Warm p95 | Execute p50 | Finalize p50 | Forwarded owners |
+| ---------------------------------------------------------------------------------------------------------- | -------: | -------: | ----------: | -----------: | ---------------: |
+| [Original holder implementation](https://github.com/vercel/eve/actions/runs/34251207503/job/102145853245)  | 3,326 ms | 4,154 ms |    1,355 ms |     1,173 ms |            90/99 |
+| [Success-abort cleanup](https://github.com/vercel/eve/actions/runs/34255378675/job/102159913084)           | 3,535 ms | 4,717 ms |    1,396 ms |     1,233 ms |            93/99 |
+| [Single snapshot log](https://github.com/vercel/eve/actions/runs/34256959236/job/102165400250)             | 1,593 ms | 2,275 ms |      560 ms |       488 ms |             7/99 |
+| [Direct tails and metadata cache](https://github.com/vercel/eve/actions/runs/34259317275/job/102173528095) | 1,470 ms | 2,265 ms |      452 ms |       373 ms |             4/99 |
 
-The log checkpoint passed both sequential and concurrent stress scenarios. These
+The log and metadata-cache checkpoints passed both sequential and concurrent stress scenarios. These
 are separate hosted observations, not interleaved trials. The abort cleanup
 shortened the native completion tail but did not improve client latency. The log
 removed the dominant storage overhead; the subsecond target is still unmet.
+The metadata-cache run still had a 12,213 ms warm outlier and a 15,167 ms concurrent
+follow-up outlier; lower medians do not resolve that tail.
 The CI report retains raw client samples and native run/step timings, including
 partial reports when a scenario fails. Event timestamps mark event construction,
 not persistence or client receipt.
@@ -884,8 +895,9 @@ and disposal members from this public API.
 Track request sends: failure rejects the ask. Buffer early replies, consume answers
 once, and isolate concurrent requests. A winning sleep race does not withdraw the
 ask; it stays answerable until answered or the body settles. Body settlement
-withdraws unresolved requests and releases waiters. Cancellation preserves the
-30-second grace period for authored code ignoring its abort signal. Agent replies
+withdraws unresolved requests and releases waiters. Cancellation waits for the body
+and its awaited work to finish unwinding; it does not abandon live work after a
+grace period. Agent replies
 use `runtime.result`; collectors retain debounce and expiry. Application-authored
 `createHook` and `createWebhook` remain unchanged.
 

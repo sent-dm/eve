@@ -1,3 +1,7 @@
+import {
+  createStreamStorageScope,
+  type StreamStorageScope,
+} from "#execution/session/stream-storage.js";
 import { selectDeliveries } from "#execution/turn/receipts.js";
 import { accountPending } from "#execution/turn/submissions.js";
 import type { TurnSettlementKind } from "#execution/turn/types.js";
@@ -54,18 +58,20 @@ interface FinalizeTurnInput {
 /** The owner calls this only after sealing admission to the completed model turn. */
 export async function finalizeTurnStep(input: FinalizeTurnInput): Promise<TurnReceipt> {
   "use step";
-  return await finalizeTurn(input);
+  return await finalizeTurn(input, createStreamStorageScope());
 }
 
 async function finalizeTurn(
   input: FinalizeTurnInput,
+  storage: StreamStorageScope,
   opened?: Awaited<ReturnType<typeof openCheckpointLog>>,
 ): Promise<TurnReceipt> {
-  const snapshots = opened ?? (await openCheckpointLog(input.session.snapshots));
+  const snapshots = opened ?? (await openCheckpointLog(input.session.snapshots, storage));
   const writeId = getStepMetadata().stepId;
   const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
-    if (isTerminal(completed.checkpoint)) await closeSession(input.session, completed.checkpoint);
+    if (isTerminal(completed.checkpoint))
+      await closeSession(input.session, completed.checkpoint, storage);
     return receipt(completed.ref, completed.checkpoint, input.eventIds);
   }
   if (snapshots.entered(writeId)) {
@@ -78,10 +84,7 @@ async function finalizeTurn(
   const original = accountPending(loaded, input.pending, input.kind);
   const result = original.result;
   const cancelling =
-    input.kind === "cancel" ||
-    input.kind === "interrupt" ||
-    input.kind === "reset" ||
-    input.kind === "timeout";
+    input.kind === "cancel" || input.kind === "interrupt" || input.kind === "reset";
   const terminal =
     input.kind === "reset" ||
     input.kind === "timeout" ||
@@ -94,7 +97,8 @@ async function finalizeTurn(
         serializedContext: result?.cancellationContext ?? original.serializedContext,
       }
     : original;
-  let settlement = input.kind === "natural" ? result?.settlement : undefined;
+  let settlement =
+    input.kind === "natural" || input.kind === "timeout" ? result?.settlement : undefined;
   if (cancelling) {
     settlement = cancellationSettlement(
       checkpoint.state,
@@ -111,13 +115,19 @@ async function finalizeTurn(
           })
         : createSessionCompletedEvent();
     settlement = {
-      events: [...(settlement?.events ?? []), stampMessageStreamEvent(event)],
+      events: [
+        ...(settlement?.events ?? []).filter(
+          (event) => input.kind !== "timeout" || event.type !== "session.waiting",
+        ),
+        stampMessageStreamEvent(event),
+      ],
       emissionAfter: settlement?.emissionAfter ?? checkpoint.state.emissionState,
     };
   }
   await snapshots.begin(writeId, checkpoint, input.checkpoint);
 
-  checkpoint = await sessionEvents.withWriter(input.session.events, async (events) => {
+  const eventStream = sessionEvents.open(input.session.events, storage);
+  checkpoint = await eventStream.withWriter(async (events) => {
     let current = checkpoint;
     if (cancelling) {
       await cancelDescendantTurns({
@@ -161,7 +171,7 @@ async function finalizeTurn(
         : result?.action === "park"
           ? result.settled
           : undefined;
-    if (input.kind === "natural" && outcome !== undefined) {
+    if ((input.kind === "natural" || input.kind === "timeout") && outcome !== undefined) {
       await notifyTurnCaller({
         caller: current.caller,
         lifecycle: terminal ? "terminal" : "parked",
@@ -222,7 +232,7 @@ async function finalizeTurn(
     result: undefined,
   };
   const ref = await snapshots.commit(checkpoint);
-  if (terminal) await closeSession(input.session, checkpoint);
+  if (terminal) await closeSession(input.session, checkpoint, storage);
   return receipt(ref, checkpoint, input.eventIds);
 }
 
@@ -236,17 +246,18 @@ export async function failTurnStep(input: {
   "use step";
   log.error("Turn execution failed", { sessionId: input.session.sessionId, error: input.error });
   const writeId = getStepMetadata().stepId;
-  const snapshots = await openCheckpointLog(input.session.snapshots);
+  const storage = createStreamStorageScope();
+  const snapshots = await openCheckpointLog(input.session.snapshots, storage);
   const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
-    await closeSession(input.session, completed.checkpoint);
+    await closeSession(input.session, completed.checkpoint, storage);
     return receipt(completed.ref, completed.checkpoint, input.eventIds);
   }
   const entered = snapshots.completed(`${writeId}:entered`);
   if (entered?.checkpoint.phase === "initialization-failed") {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
-    await closeSession(input.session, entered.checkpoint);
+    await closeSession(input.session, entered.checkpoint, storage);
     throw new Error("The previous initialization failure notification did not commit its effects.");
   }
   const latest = await snapshots.read(input.checkpoint);
@@ -260,6 +271,7 @@ export async function failTurnStep(input: {
         eventIds: input.eventIds,
         pending: [],
       },
+      storage,
       snapshots,
     );
   }
@@ -286,10 +298,10 @@ export async function failTurnStep(input: {
       : await snapshots.commit(failed);
   if (failed.writeId !== `${writeId}:entered`) {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
-    await closeSession(input.session, failed);
+    await closeSession(input.session, failed, storage);
     return receipt(enteringRef, failed, input.eventIds);
   }
-  await sessionEvents.append(input.session.events, [failed.event]);
+  await sessionEvents.open(input.session.events, storage).append([failed.event]);
   await notifyInitializationFailure({
     event: failed.event,
     serializedContext: {
@@ -300,7 +312,7 @@ export async function failTurnStep(input: {
   await publishSessionDescriptor(input.session.holderRunId, input.session);
   const committed: InitializationFailureCheckpoint = { ...failed, writeId };
   const ref = await snapshots.commit(committed);
-  await closeSession(input.session, committed);
+  await closeSession(input.session, committed, storage);
   return receipt(ref, committed, input.eventIds);
 }
 
@@ -311,9 +323,10 @@ function isTerminal(checkpoint: SessionCheckpoint): boolean {
 async function closeSession(
   session: SessionResources,
   checkpoint: SessionCheckpoint,
+  storage: StreamStorageScope,
 ): Promise<void> {
-  await sessionEvents.close(session.events);
-  await sessionSnapshots.close(session.snapshots);
+  await sessionEvents.open(session.events, storage).close();
+  await sessionSnapshots.close(session.snapshots, storage);
   if (checkpoint.phase !== "initialization-failed" && checkpoint.timeoutRunId !== undefined) {
     await cancelSessionTimeout({ runId: checkpoint.timeoutRunId });
   }

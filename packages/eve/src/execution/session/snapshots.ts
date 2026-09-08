@@ -1,6 +1,9 @@
 import { equalSnapshot } from "#execution/session/snapshot-equality.js";
 import type { SnapshotRecordRef, SnapshotStreamRef } from "#execution/session/resources.js";
-import { openStreamStorage } from "#execution/session/stream-storage.js";
+import {
+  createStreamStorageScope,
+  type StreamStorageScope,
+} from "#execution/session/stream-storage.js";
 
 interface SnapshotWrite {
   readonly writeId: string;
@@ -52,8 +55,11 @@ function checkpointFromEntry<Checkpoint>(
 }
 
 export const sessionSnapshots = {
-  async initialize(ref: SnapshotStreamRef): Promise<void> {
-    const storage = openStreamStorage(ref.id);
+  async initialize(
+    ref: SnapshotStreamRef,
+    scope: StreamStorageScope = createStreamStorageScope(),
+  ): Promise<void> {
+    const storage = scope.open(ref.id);
     if ((await storage.tailIndex()) === -1) {
       await storage.append<SnapshotEntry<never>>([{ kind: "initialized", index: 0 }]);
     }
@@ -61,8 +67,9 @@ export const sessionSnapshots = {
 
   async open<Checkpoint extends SnapshotWrite>(
     stream: SnapshotStreamRef,
+    scope: StreamStorageScope = createStreamStorageScope(),
   ): Promise<SnapshotLog<Checkpoint>> {
-    const storage = openStreamStorage(stream.id);
+    const storage = scope.open(stream.id);
     const head = await storage.readRecord<SnapshotEntry<Checkpoint>>(-1);
     validateEntry(head);
     let index = head.index;
@@ -141,7 +148,10 @@ export const sessionSnapshots = {
     };
   },
 
-  close(ref: SnapshotStreamRef): Promise<void> {
-    return openStreamStorage(ref.id).append([], true);
+  close(
+    ref: SnapshotStreamRef,
+    scope: StreamStorageScope = createStreamStorageScope(),
+  ): Promise<void> {
+    return scope.open(ref.id).append([], true);
   },
 };

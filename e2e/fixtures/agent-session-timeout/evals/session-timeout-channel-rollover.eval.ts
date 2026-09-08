@@ -43,11 +43,16 @@ export default defineEval({
     const activeTurn = await t.target.watchTurn(expiredSessionId).result();
     activeTurn.expectOk();
     activeTurn.notEvent("turn.failed");
+    activeTurn.notEvent("turn.cancelled");
+    activeTurn.event("turn.completed", { count: 1 });
     await t.require(activeTurn.message, equals("timeout-ack:SLOW-TURN"));
 
-    const terminal = await t.target
-      .watchTurn(expiredSessionId, { startIndex: activeTurn.events.length })
-      .result();
+    const terminal =
+      activeTurn.status === "completed"
+        ? activeTurn
+        : await t.target
+            .watchTurn(expiredSessionId, { startIndex: activeTurn.events.length })
+            .result();
     await t.require(terminal.status, equals("completed"));
     terminal.event("session.completed");
     terminal.notEvent("turn.failed");

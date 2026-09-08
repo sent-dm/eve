@@ -1,17 +1,21 @@
 import { defineTool } from "eve/tools";
-import { sleep } from "workflow";
+import { ask } from "eve/workflow";
 import { z } from "zod";
 
 /**
- * Parks the turn on a long durable sleep so a steer can cancel it. Exercises
- * cancellation cascading into a workflow tool run.
+ * Holds an admitted workflow body on a cancellation-aware input wait.
+ * Cancelling must unwind this body before its owner can release the turn.
  */
 export default defineTool({
   description: "Hold a deploy open until cancelled.",
   inputSchema: z.strictObject({ service: z.string() }),
-  async execute({ service }) {
+  async execute({ service }, ctx) {
     "use workflow";
-    await sleep("10m");
+    await ask(ctx, {
+      display: "confirmation",
+      prompt: `Continue holding ${service}?`,
+      options: [{ id: "continue", label: "Continue" }],
+    });
     return { held: service };
   },
 });

@@ -32,7 +32,7 @@ describe("turn boundary decisions", () => {
     ).toBe("cancel");
     expect(interruptionKind(submission({ kind: "cancel" }), progress.turnId)).toBe("cancel");
   });
-  it("prioritizes reset and timeout over cancellation and replacement", () => {
+  it("prioritizes reset over cancellation and replacement without interrupting for expiry", () => {
     const controls = [
       envelope({ kind: "cancel" }),
       envelope({ kind: "send", turnPolicy: "interrupt", payload: { message: "replace" } }),
@@ -40,12 +40,23 @@ describe("turn boundary decisions", () => {
     ];
     expect(reduceTurnBoundary(progress, controls)).toEqual({
       kind: "finalize",
-      settlement: "timeout",
+      settlement: "cancel",
     });
     expect(reduceTurnBoundary(progress, [...controls, envelope({ kind: "reset" })])).toEqual({
       kind: "finalize",
       settlement: "reset",
     });
+  });
+  it("lets model and runtime work finish before session expiry", () => {
+    const timeout = { kind: "session-timeout" } as const;
+    expect(interruptionKind(submission(timeout), progress.turnId)).toBeUndefined();
+    for (const action of ["continue", "dispatch", "wait", "settle"] as const) {
+      expect(reduceTurnBoundary({ ...progress, action }, [envelope(timeout)])).toEqual(
+        action === "settle"
+          ? { kind: "finalize", settlement: "natural" }
+          : { kind: action === "continue" ? "model" : action },
+      );
+    }
   });
   it("settles queue-only messages so their candidate can claim the next turn", () => {
     expect(

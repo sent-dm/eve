@@ -53,12 +53,14 @@ function respond(request: MockModelRequest): MockModelResponse | string {
     }`;
   }
 
-  if (message.includes("update: WORKFLOW-REPORT-PROGRESS")) {
-    return "WORKFLOW-REPORT-UPDATE-RECEIVED";
-  }
   if (message.includes("is completed") && message.includes("WORKFLOW-REPORT-COMPLETE")) {
     return "WORKFLOW-REPORT-DONE";
   }
+
+  if (message.includes("update: WORKFLOW-REPORT-PROGRESS")) {
+    return "WORKFLOW-REPORT-UPDATE-RECEIVED";
+  }
+
   if (message.includes("is completed") && message.includes("WORKFLOW-CHILD:api:background")) {
     return "WORKFLOW-MIXED-AGENTS-BACKGROUND-DONE";
   }

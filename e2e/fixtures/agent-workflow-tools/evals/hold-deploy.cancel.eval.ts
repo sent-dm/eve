@@ -1,5 +1,6 @@
 import { defineEval } from "eve/evals";
 import { satisfies } from "eve/evals/expect";
+import { waitForInput } from "./live-input.shared.ts";
 
 /**
  * Cancelling the turn cancels the workflow tool run holding it open. The turn
@@ -8,15 +9,10 @@ import { satisfies } from "eve/evals/expect";
  */
 export default defineEval({
   timeoutMs: 60_000,
-  description: "Steering a turn cancels the workflow tool run it is parked on.",
+  description: "Cancelling a turn unwinds its admitted workflow tool before releasing ownership.",
   async test(t) {
     const live = await t.start("WORKFLOW-HOLD-START");
-    await live.waitForEvent("actions.requested", {
-      data: {
-        actions: (actions) =>
-          actions.some((action) => "toolName" in action && action.toolName === "hold_deploy"),
-      },
-    });
+    await waitForInput(t, live, { toolName: "hold_deploy" });
 
     const cancelled = await live.cancel();
     await t.require(

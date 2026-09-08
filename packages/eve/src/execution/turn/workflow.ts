@@ -23,6 +23,8 @@ export async function turnWorkflow(input: TurnWorkflowInput): Promise<TurnReceip
   const token = activeTurnToken(input.session.sessionId);
   let checkpoint: SnapshotRecordRef | undefined;
   if (input.afterRunId !== undefined) await awaitTurnStep(input.afterRunId);
+  // Register cancellation alongside ownership to share the durable hook-creation phase.
+  const controller = new AbortController();
   while (true) {
     const inbox = createOwnerInbox({ token });
     try {
@@ -31,7 +33,7 @@ export async function turnWorkflow(input: TurnWorkflowInput): Promise<TurnReceip
         const eventIds = new Set([input.submission.eventId]);
         let result: Exclude<TurnExecutionResult, { kind: "progress" }>;
         try {
-          result = await executeClaimedTurn(input, inbox, eventIds, (ref) => {
+          result = await executeClaimedTurn(input, inbox, controller, eventIds, (ref) => {
             checkpoint = ref;
           });
         } catch (error) {
@@ -64,16 +66,17 @@ export async function turnWorkflow(input: TurnWorkflowInput): Promise<TurnReceip
 async function executeClaimedTurn(
   input: TurnWorkflowInput,
   inbox: OwnerInbox,
+  controller: AbortController,
   eventIds: Set<string>,
   observeCheckpoint: (ref: SnapshotRecordRef) => void,
 ): Promise<Exclude<TurnExecutionResult, { kind: "progress" }>> {
-  const controller = new AbortController();
   let turnId = `turn_${inbox.address.ownerRunId}`;
   let taskId =
     input.submission.command.kind === "send"
       ? (input.submission.command.caller?.taskId ?? input.submission.initial?.taskId)
       : input.submission.initial?.taskId;
   let ownerFailure: { error: unknown } | undefined;
+  let expired = input.submission.command.kind === "session-timeout";
   let active = true;
   const failOwner = (error: unknown): void => {
     if (!active) return;
@@ -83,6 +86,7 @@ async function executeClaimedTurn(
   const observeEnvelope = (envelope: InboxEnvelope): void => {
     const submission = submissionFromEnvelope(envelope);
     if (submission !== undefined) eventIds.add(submission.eventId);
+    if (submission?.command.kind === "session-timeout") expired = true;
     if (submission !== undefined && interruptionKind(submission, turnId, taskId) !== undefined) {
       controller.abort(new TurnCancelledError());
     }
@@ -191,9 +195,11 @@ async function executeClaimedTurn(
           eventIds: [...eventIds],
           claimedContinuationToken: progress.continuationToken || undefined,
           kind:
-            initialKind === "reset" || initialKind === "timeout"
-              ? initialKind
-              : decision.settlement,
+            initialKind === "reset"
+              ? "reset"
+              : expired && decision.settlement === "natural" && !progress.terminal
+                ? "timeout"
+                : decision.settlement,
           pending,
         });
         if (!receipt.terminal) await claimAlias(receipt.continuationToken);

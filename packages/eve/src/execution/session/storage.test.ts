@@ -7,6 +7,7 @@ import {
 } from "#execution/session/directory.js";
 import { sessionEvents } from "#execution/session/events.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
+import { createStreamStorageScope } from "#execution/session/stream-storage.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
 import { createSessionStartedEvent, stampMessageStreamEvent } from "#protocol/message.js";
 
@@ -22,6 +23,7 @@ const streams = new Map<string, StoredStream>();
 let failWrite: string | undefined;
 let failAfterWrite = false;
 let pauseFlush: Promise<void> | undefined;
+const streamFlushes = new Map<string, Promise<void>>();
 let reads = 0;
 let tailReads = 0;
 let writes = 0;
@@ -45,10 +47,12 @@ function stored(key: string): StoredStream {
 }
 
 beforeEach(() => {
+  runtime.getRun.mockClear();
   streams.clear();
   failWrite = undefined;
   failAfterWrite = false;
   pauseFlush = undefined;
+  streamFlushes.clear();
   reads = 0;
   tailReads = 0;
   writes = 0;
@@ -96,6 +100,7 @@ beforeEach(() => {
       });
       const flushed = released.then(async () => {
         await pauseFlush;
+        await streamFlushes.get(key);
         if (failWrite !== undefined && key.includes(failWrite))
           throw new Error("Storage unavailable");
         if (source.closed && pending.length > 0) throw new Error("Stream is closed");
@@ -183,6 +188,90 @@ describe("session directory", () => {
     await expect(
       publishSessionDescriptor("holder", { ...resources, initialEventId: "changed" }),
     ).rejects.toThrow("different contents");
+  });
+});
+
+describe("step storage scopes", () => {
+  it("shares owner resolution between snapshot and event streams only within each step", async () => {
+    const resources = createSessionResources("holder", "initial");
+    await sessionSnapshots.initialize(resources.snapshots);
+    runtime.getRun.mockClear();
+    for (const phase of ["execute", "finalize"]) {
+      const scope = createStreamStorageScope();
+      const snapshots = await sessionSnapshots.open(resources.snapshots, scope);
+      const events = sessionEvents.open(resources.events, scope);
+      await snapshots.append({ writeId: `${phase}:entered` });
+      await events.withWriter(async (writable) => {
+        const writer = writable.getWriter();
+        try {
+          await writer.write(new Uint8Array([1]));
+        } finally {
+          writer.releaseLock();
+        }
+      });
+      await snapshots.append({ writeId: phase });
+    }
+    expect(runtime.getRun.mock.calls).toEqual([["holder"], ["holder"]]);
+    expect(runtime.getRun.mock.results[0]?.value).not.toBe(runtime.getRun.mock.results[1]?.value);
+    expect(stored(resources.events.id).chunks).toHaveLength(2);
+    expect(stored(resources.snapshots.id).chunks).toHaveLength(5);
+  });
+
+  it("resolves independently owned streams without coupling them to the logical holder", async () => {
+    const resources = {
+      ...createSessionResources("holder", "initial"),
+      events: createSessionResources("event-owner", "initial").events,
+      snapshots: createSessionResources("snapshot-owner", "initial").snapshots,
+    };
+    const scope = createStreamStorageScope();
+    await sessionSnapshots.initialize(resources.snapshots, scope);
+    const snapshots = await sessionSnapshots.open(resources.snapshots, scope);
+    await snapshots.append({ writeId: "committed" });
+    await sessionEvents.open(resources.events, scope).withWriter(async (writable) => {
+      const writer = writable.getWriter();
+      try {
+        await writer.write(new Uint8Array([2]));
+      } finally {
+        writer.releaseLock();
+      }
+    });
+    expect(runtime.getRun.mock.calls).toEqual([["snapshot-owner"], ["event-owner"]]);
+    expect([...streams.keys()]).toEqual([resources.snapshots.id, resources.events.id]);
+    expect(snapshots.latest?.ref.streamId).toBe(resources.snapshots.id);
+  });
+
+  it("keeps independent flush and close boundaries when streams share a Run", async () => {
+    const resources = createSessionResources("holder", "initial");
+    const scope = createStreamStorageScope();
+    const snapshots = scope.open(resources.snapshots.id);
+    const events = sessionEvents.open(resources.events, scope);
+    const flushing = Promise.withResolvers<void>();
+    streamFlushes.set(resources.events.id, flushing.promise);
+    let eventDurable = false;
+    const pending = events
+      .withWriter(async (writable) => {
+        const writer = writable.getWriter();
+        try {
+          await writer.write(new Uint8Array([3]));
+        } finally {
+          writer.releaseLock();
+        }
+      })
+      .then(() => {
+        eventDurable = true;
+      });
+    await snapshots.append([{ marker: "independent" }]);
+    expect(eventDurable).toBe(false);
+    expect(stored(resources.snapshots.id).chunks).toEqual([{ marker: "independent" }]);
+    expect(stored(resources.events.id).chunks).toHaveLength(0);
+    flushing.resolve();
+    await pending;
+    expect(eventDurable).toBe(true);
+    await events.close();
+    expect(stored(resources.events.id).closed).toBe(true);
+    expect(stored(resources.snapshots.id).closed).toBe(false);
+    await snapshots.append([{ marker: "still open" }]);
+    expect(runtime.getRun.mock.calls).toEqual([["holder"]]);
   });
 });
 
@@ -375,7 +464,8 @@ describe("session event writes", () => {
     pauseFlush = flush.promise;
     let completed = false;
     const pending = sessionEvents
-      .withWriter(events, async (writable) => {
+      .open(events)
+      .withWriter(async (writable) => {
         entered.resolve();
         await start.promise;
         const first = writable.getWriter();
@@ -423,9 +513,12 @@ describe("session event writes", () => {
     });
     const event = stampMessageStreamEvent(createSessionStartedEvent());
     let completed = false;
-    const pending = sessionEvents.append(events, [event]).then(() => {
-      completed = true;
-    });
+    const pending = sessionEvents
+      .open(events)
+      .append([event])
+      .then(() => {
+        completed = true;
+      });
     await Promise.resolve();
     expect(completed).toBe(false);
     expect(stored(events.id).chunks).toHaveLength(0);
@@ -446,7 +539,7 @@ describe("session event writes", () => {
       flush = resolve;
     });
     const failure = new Error("Callback failed");
-    const pending = sessionEvents.withWriter(events, async (writable) => {
+    const pending = sessionEvents.open(events).withWriter(async (writable) => {
       const writer = writable.getWriter();
       await writer.write(new Uint8Array([1]));
       writer.releaseLock();
@@ -463,7 +556,7 @@ describe("session event writes", () => {
     const { events } = createSessionResources("holder", "first");
     failWrite = "holder";
     const failure = new Error("Callback failed");
-    const pending = sessionEvents.withWriter(events, async (writable) => {
+    const pending = sessionEvents.open(events).withWriter(async (writable) => {
       const writer = writable.getWriter();
       await writer.write(new Uint8Array([1]));
       writer.releaseLock();
@@ -477,7 +570,7 @@ describe("session event writes", () => {
   it("releases the native writer and flushes even when a failing callback keeps its borrower locked", async () => {
     const { events } = createSessionResources("holder", "first");
     const failure = new Error("Callback failed");
-    const pending = sessionEvents.withWriter(events, async (writable) => {
+    const pending = sessionEvents.open(events).withWriter(async (writable) => {
       const writer = writable.getWriter();
       await writer.write(new Uint8Array([1]));
       throw failure;

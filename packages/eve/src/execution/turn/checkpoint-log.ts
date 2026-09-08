@@ -1,3 +1,7 @@
+import {
+  createStreamStorageScope,
+  type StreamStorageScope,
+} from "#execution/session/stream-storage.js";
 import type { SnapshotRecordRef, SnapshotStreamRef } from "#execution/session/resources.js";
 import { sessionSnapshots, type StoredSnapshot } from "#execution/session/snapshots.js";
 import type { SessionCheckpoint } from "#execution/turn/types.js";
@@ -12,8 +16,11 @@ export interface CheckpointAttempt {
 export type TurnCheckpointRecord = SessionCheckpoint | CheckpointAttempt;
 
 /** Effects begin after a small durable marker; only commits copy the session state. */
-export async function openCheckpointLog(stream: SnapshotStreamRef) {
-  const log = await sessionSnapshots.open<TurnCheckpointRecord>(stream);
+export async function openCheckpointLog(
+  stream: SnapshotStreamRef,
+  scope: StreamStorageScope = createStreamStorageScope(),
+) {
+  const log = await sessionSnapshots.open<TurnCheckpointRecord>(stream, scope);
   const read = async (
     ref?: SnapshotRecordRef,
   ): Promise<StoredSnapshot<SessionCheckpoint> | undefined> => {

@@ -12,10 +12,9 @@ export function interruptionKind(
   submission: AcceptedSubmission,
   turnId: string | undefined,
   taskId?: string,
-): Exclude<TurnSettlementKind, "natural" | "failure"> | undefined {
+): Exclude<TurnSettlementKind, "natural" | "failure" | "timeout"> | undefined {
   const command = submission.command;
   if (command.kind === "reset") return "reset";
-  if (command.kind === "session-timeout") return "timeout";
   if (
     command.kind === "cancel" &&
     (command.turnId === undefined || command.turnId === turnId) &&
@@ -41,7 +40,7 @@ export function reduceTurnBoundary(
     .map(submissionFromEnvelope)
     .filter((value): value is AcceptedSubmission => value !== undefined)
     .map((submission) => interruptionKind(submission, progress.turnId, progress.taskId));
-  for (const kind of ["reset", "timeout", "cancel", "interrupt"] as const) {
+  for (const kind of ["reset", "cancel", "interrupt"] as const) {
     if (controls.includes(kind)) return { kind: "finalize", settlement: kind };
   }
   if (progress.action === "cancelled") return { kind: "finalize", settlement: "cancel" };

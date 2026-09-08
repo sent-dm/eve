@@ -27,6 +27,7 @@ describe("ordinary turn storage budget", () => {
         calls: Record<string, number>;
         clientMs: number;
         completionMs: number;
+        hookCreationPasses: number;
       }> = [];
       const spies = [
         vi.spyOn(world.runs, "get"),
@@ -44,6 +45,7 @@ describe("ordinary turn storage budget", () => {
         "streams.writeMulti",
         "streams.close",
       ];
+      const eventCreates = vi.spyOn(world.events, "create");
       try {
         const initialEvents = await capture.nextTurn();
         const firstTurn = initialEvents.find((event) => event.type === "turn.started");
@@ -51,6 +53,7 @@ describe("ordinary turn storage budget", () => {
         await getRun(firstTurn!.data.turnId.replace(/^turn_/, "")).returnValue;
         for (let index = 0; index < 3; index++) {
           for (const spy of spies) spy.mockClear();
+          eventCreates.mockClear();
           const startedAt = performance.now();
           const candidate = await dispatchSessionCommand(session.sessionId, {
             kind: "send",
@@ -59,21 +62,34 @@ describe("ordinary turn storage budget", () => {
           const events = await capture.nextTurn();
           const clientMs = performance.now() - startedAt;
           await candidate.run.returnValue;
+          let replay = 0;
+          const hookCreations = eventCreates.mock.calls.flatMap(([runId, event]) => {
+            if (runId !== candidate.run.runId) return [];
+            if (event.eventType === "run_started") replay++;
+            return event.eventType === "hook_created" ? [replay] : [];
+          });
+          expect(hookCreations).toEqual([1, 1]);
           const calls = Object.fromEntries(
             spies.map((spy, index) => [
               methods[index]!,
               spy.mock.calls.filter((args) => args[0] === session.sessionId).length,
             ]),
           );
-          samples.push({ calls, clientMs, completionMs: performance.now() - startedAt });
+          samples.push({
+            calls,
+            clientMs,
+            completionMs: performance.now() - startedAt,
+            hookCreationPasses: new Set(hookCreations).size,
+          });
           expect(events.filter((event) => event.type === "step.completed")).toHaveLength(1);
           expect(events.at(-1)?.type).toBe("session.waiting");
           expect(Object.values(calls).reduce((sum, count) => sum + count, 0)).toBeLessThanOrEqual(
-            14,
+            12,
           );
         }
         return samples;
       } finally {
+        eventCreates.mockRestore();
         for (const spy of spies) spy.mockRestore();
         capture.dispose();
         await session.cancel();

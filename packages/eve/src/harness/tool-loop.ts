@@ -117,7 +117,7 @@ import {
   emitStepStarted,
   emitStreamContent,
   emitTurnEpilogue,
-  emitTurnPreamble,
+  emitTurnInput,
   getHarnessEmissionState,
   setHarnessEmissionState,
 } from "#harness/emission.js";
@@ -540,6 +540,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       };
     };
     const preparePreambleTrace = async (): Promise<RuntimeTraceContext | undefined> => {
+      if (emissionState.turnId !== "") return undefined;
       return await stepInstrumentation?.preparePreamble({
         sequence: emissionState.sequence,
         sessionStarted: emissionState.sessionStarted,
@@ -843,7 +844,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         let instructionMessages: ModelMessage[] = [];
         try {
           const traceContext = await preparePreambleTrace();
-          emissionState = await emitTurnPreamble(
+          emissionState = await emitTurnInput(
             emit,
             preambleStepInput ?? {},
             emissionState,
@@ -984,7 +985,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       }
       try {
         const traceContext = await preparePreambleTrace();
-        emissionState = await emitTurnPreamble(
+        emissionState = await emitTurnInput(
           emit,
           preambleStepInput ?? {},
           emissionState,
@@ -1797,7 +1798,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     } catch {
       modelTag = undefined;
     }
-    await setEveAttributes({
+    const attributes = setEveAttributes({
       "$eve.model": modelTag,
       "$eve.input_tokens": nextTurnUsage.inputTokens,
       "$eve.output_tokens": nextTurnUsage.outputTokens,
@@ -1809,18 +1810,24 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
 
     // --- Handle result ------------------------------------------------------
 
-    return handleStepResult({
-      config,
-      emit,
-      emissionState,
-      durableModelPromptMessageCount:
-        ephemeralContextMessages.length === 0 ? projectedMessages.length : undefined,
-      promptMessages: messages,
-      result,
-      runStep,
-      session,
-      coordinationTools: modelCallCoordinationTools,
-    });
+    try {
+      return await handleStepResult({
+        config,
+        emit,
+        emissionState,
+        durableModelPromptMessageCount:
+          ephemeralContextMessages.length === 0 ? projectedMessages.length : undefined,
+        promptMessages: messages,
+        result,
+        runStep,
+        session,
+        coordinationTools: modelCallCoordinationTools,
+      });
+    } finally {
+      // Settlement can flush its output while tags persist; the next model
+      // step still waits, preserving cumulative attribute write order.
+      await attributes;
+    }
   }
 
   return runStep;

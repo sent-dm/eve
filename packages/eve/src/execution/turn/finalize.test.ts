@@ -7,7 +7,11 @@ import { failTurnStep, finalizeTurnStep } from "#execution/turn/finalize.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
 import type { InitializedSessionCheckpoint } from "#execution/turn/types.js";
 import { createDurableSessionState } from "#execution/session/state.js";
-import { createSessionWaitingEvent, stampMessageStreamEvent } from "#protocol/message.js";
+import {
+  createSessionWaitingEvent,
+  createTurnCompletedEvent,
+  stampMessageStreamEvent,
+} from "#protocol/message.js";
 
 const mocks = vi.hoisted(() => ({
   stepId: "commit",
@@ -46,12 +50,12 @@ vi.mock("#execution/session/snapshots.js", () => ({
 }));
 vi.mock("#execution/session/events.js", () => ({
   sessionEvents: {
-    append: mocks.appendEvents,
-    close: mocks.closeEvents,
-    withWriter: async (
-      _ref: unknown,
-      callback: (writable: WritableStream<Uint8Array>) => Promise<unknown>,
-    ) => callback(new WritableStream()),
+    open: (ref: unknown) => ({
+      append: (events: unknown) => mocks.appendEvents(ref, events),
+      close: () => mocks.closeEvents(ref),
+      withWriter: async (callback: (writable: WritableStream<Uint8Array>) => Promise<unknown>) =>
+        callback(new WritableStream()),
+    }),
   },
 }));
 vi.mock("#execution/session/directory.js", () => ({ publishSessionDescriptor: mocks.publish }));
@@ -180,6 +184,62 @@ beforeEach(() => {
 });
 
 describe("turn finalization", () => {
+  it("expires after preserving the active turn's successful outcome and model state", async () => {
+    const original = current as InitializedSessionCheckpoint;
+    const proposed = original.result!;
+    current = {
+      ...original,
+      result: {
+        ...proposed,
+        action: "park",
+        hasPendingAuthorization: false,
+        hasPendingInputBatch: false,
+        settled: { output: "Completed before expiry" },
+        cancellationState: { ...original.state, continuationToken: "discarded-rollback" },
+        settlement: {
+          events: [
+            stampMessageStreamEvent(createTurnCompletedEvent({ turnId: "active", sequence: 0 })),
+            stampMessageStreamEvent(createSessionWaitingEvent()),
+          ],
+          emissionAfter: original.state.emissionState,
+        },
+      },
+    };
+    records.set("proposal", current);
+    const result = await finalizeTurnStep({
+      session: resources,
+      eventIds: ["initial", "expiry"],
+      checkpoint: recordRef("proposal"),
+      kind: "timeout",
+      pending: [
+        {
+          kind: "session.submit",
+          eventId: "expiry",
+          payload: {
+            candidateRunId: "timer",
+            submission: { eventId: "expiry", command: { kind: "session-timeout" } },
+          },
+        },
+      ],
+    });
+    expect(result).toMatchObject({ terminal: true, deliveries: { expiry: "applied" } });
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(mocks.cancelDescendants).not.toHaveBeenCalled();
+    expect(mocks.notifyCancel).not.toHaveBeenCalled();
+    expect(mocks.finalize.mock.lastCall?.[0].sessionState).toEqual(original.state);
+    expect(
+      mocks.finalize.mock.lastCall?.[0].settlement.events.map(
+        (event: { type: string }) => event.type,
+      ),
+    ).toEqual(["turn.completed", "session.completed"]);
+    expect(mocks.notifyCaller).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lifecycle: "terminal",
+        settled: { output: "Completed before expiry" },
+      }),
+    );
+    expect(mocks.closeEvents).toHaveBeenCalledOnce();
+  });
   it("keeps a caller parked on HITL and preserves the accepting candidate of queued input", async () => {
     const original = current as InitializedSessionCheckpoint;
     records.set("proposal", {

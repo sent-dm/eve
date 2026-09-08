@@ -1,3 +1,4 @@
+import { createStreamStorageScope } from "#execution/session/stream-storage.js";
 import { selectDeliveries } from "#execution/turn/receipts.js";
 import {
   commandDelivery,
@@ -38,6 +39,7 @@ import { coalesceDeliveries } from "#harness/messages.js";
 import { startSessionTimeout } from "#execution/session-timeout-steps.js";
 import { sessionCommandToken } from "#execution/session-command-token.js";
 import { DEFAULT_SESSION_TIMEOUT_MS } from "#execution/session-timeout.js";
+import { advanceStep } from "#harness/emission.js";
 
 export interface ExecuteTurnInput {
   readonly session: SessionResources;
@@ -52,7 +54,8 @@ export interface ExecuteTurnInput {
 export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExecutionResult> {
   "use step";
   const writeId = getStepMetadata().stepId;
-  const snapshots = await openCheckpointLog(input.session.snapshots);
+  const storage = createStreamStorageScope();
+  const snapshots = await openCheckpointLog(input.session.snapshots, storage);
   const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
     if (completed.checkpoint.phase === "initialization-failed")
@@ -150,15 +153,6 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
         },
       }),
     };
-    await setEveAttributes(
-      buildTurnAttributes({
-        parentSessionId: input.session.sessionId,
-        rootSessionId: readRootSessionId(checkpoint.serializedContext) ?? input.session.sessionId,
-        requestId:
-          input.submission.command.kind === "send" ? input.submission.command.requestId : undefined,
-        serializedContext: checkpoint.serializedContext,
-      }),
-    );
   }
   checkpoint = {
     ...checkpoint,
@@ -166,7 +160,24 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     phase: "running",
     writeId: `${writeId}:entered`,
   };
-  await snapshots.begin(writeId, checkpoint, previous?.ref);
+  const entry = await Promise.allSettled([
+    snapshots.begin(writeId, checkpoint, previous?.ref),
+    input.checkpoint === undefined
+      ? setEveAttributes(
+          buildTurnAttributes({
+            parentSessionId: input.session.sessionId,
+            rootSessionId:
+              readRootSessionId(checkpoint.serializedContext) ?? input.session.sessionId,
+            requestId:
+              input.submission.command.kind === "send"
+                ? input.submission.command.requestId
+                : undefined,
+            serializedContext: checkpoint.serializedContext,
+          }),
+        )
+      : undefined,
+  ]);
+  for (const result of entry) if (result.status === "rejected") throw result.reason;
   if (input.submission.eventId === input.session.initialEventId) {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
   }
@@ -182,7 +193,8 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     checkpoint = { ...checkpoint, result };
   }
   const admitted = checkpoint;
-  checkpoint = await sessionEvents.withWriter(input.session.events, async (events) => {
+  const eventStream = sessionEvents.open(input.session.events, storage);
+  checkpoint = await eventStream.withWriter(async (events) => {
     let state = admitted;
     if (input.work.kind !== "dispatch") {
       const envelopes = input.work.envelopes ?? [];
@@ -282,9 +294,9 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
           if (command.kind === "runtime") payload = command.payload;
           else if (command.kind === "clear" || command.kind === "compact")
             payload = { kind: command.kind };
-          else if (command.kind === "cancel") {
+          else if (command.kind === "cancel" || command.kind === "session-timeout") {
             remaining.shift();
-            applied[submission.eventId] = "retired";
+            applied[submission.eventId] = command.kind === "cancel" ? "retired" : "applied";
             return {
               ...state,
               deliveries: applied,
@@ -330,8 +342,28 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
         };
       }
     }
-    if (payload === undefined && state.result === undefined && (state.inputs?.length ?? 0) === 0) {
-      return { ...state, result: parkedResult(state) };
+    if (payload === undefined && state.result?.action !== "continue") {
+      return {
+        ...state,
+        deliveries: applied,
+        inputs: remaining,
+        result: state.result ?? parkedResult(state),
+      };
+    }
+    if (state.result?.settlement !== undefined) {
+      const session = state.state.snapshot.session;
+      state = {
+        ...state,
+        state: replaceDurableSessionSnapshot({
+          session: {
+            ...session,
+            state: {
+              ...session.state,
+              "eve.harness.emission": advanceStep(state.state.emissionState),
+            },
+          },
+        }),
+      };
     }
     const result = await runModel({
       input: payload,

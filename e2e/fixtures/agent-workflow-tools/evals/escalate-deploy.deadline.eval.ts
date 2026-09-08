@@ -1,7 +1,8 @@
 import { defineEval } from "eve/evals";
+import { requirePendingTool, respondWhileRunning, waitForInput } from "./live-input.shared.ts";
 
 /**
- * `ask` returns the hook, so the question composes with `Promise.race` — here
+ * `ask` returns a Promise, so the question composes with `Promise.race` — here
  * against a long deadline. The human answers, the race resolves to their
  * choice, and the run settles the call.
  */
@@ -9,15 +10,15 @@ export default defineEval({
   description:
     "A workflow tool races ask against a deadline; the answer wins and settles the call.",
   async test(t) {
-    const parked = await t.send("WORKFLOW-ESCALATE-START");
-    t.requireInputRequest({
+    const live = await t.start("WORKFLOW-ESCALATE-START");
+    const request = await waitForInput(t, live, {
       display: "confirmation",
       optionIds: ["approve", "cancel"],
       toolName: "escalate_deploy",
     });
-    parked.calledTool("escalate_deploy", { status: "pending", count: 1 });
+    await requirePendingTool(t, live, "escalate_deploy");
 
-    const answered = await t.respondAll("approve");
+    const answered = await respondWhileRunning(t, live, request, "approve");
     answered.expectOk();
     answered.calledTool("escalate_deploy", { output: /"decided":"approved"/u });
     answered.messageIncludes("WORKFLOW-ESCALATE-RESULT");

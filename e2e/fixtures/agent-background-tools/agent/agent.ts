@@ -29,15 +29,15 @@ function respond(request: MockModelRequest): MockModelResponse | string {
     return "BACKGROUND-EXPORT-STARTED";
   }
 
-  if (message.includes(`update: ${PROGRESS}`)) {
-    return "BACKGROUND-EXPORT-UPDATE-RECEIVED";
-  }
-
   if (
     message.includes("is completed") &&
     (message.includes(RESULT) || message.includes("ship-it"))
   ) {
     return "BACKGROUND-EXPORT-DONE";
+  }
+
+  if (message.includes(`update: ${PROGRESS}`)) {
+    return "BACKGROUND-EXPORT-UPDATE-RECEIVED";
   }
 
   if (message.startsWith("Background task ")) {

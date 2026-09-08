@@ -171,7 +171,7 @@ result; throwing ends it with the failure.
 
 ## Cancel and clean up: `ctx.abortSignal`
 
-`ctx.abortSignal` aborts when the run is cancelled: a steered turn for a waiting tool, `task_cancel`
+`ctx.abortSignal` aborts when the run is cancelled: an interrupted turn for a waiting tool, `task_cancel`
 or the session ending for a background one. It is durable — it survives replay, and a step that
 receives it observes the abort. Pass it into the steps that should stop, and clean up in
 `try/finally`:
@@ -188,10 +188,10 @@ async execute({ projectId }, ctx) {
 }
 ```
 
-After the signal fires, the run waits up to 30 seconds for the body to finish unwinding, then ends
-as cancelled whether or not it did. A body parked on a hook or a `sleep` does not observe the signal;
-it is abandoned when the grace period ends. Steps that received the signal are how you clean up
-first.
+After the signal fires, cancellation completes when the body and its awaited work finish
+unwinding. `ask()` observes the signal; raw hooks and Workflow `sleep` do not. Pass the signal to
+interruptible steps and arrange for other waits to settle. A body that ignores cancellation keeps
+the run pending until it settles.
 
 ## Workflow tool examples
 
@@ -309,7 +309,8 @@ cancellation. A background tool's call resolves once, with the receipt; everythi
 separate session input.
 
 While a waiting tool runs, the turn is parked. A `queue` message waits for it. A `steer` message
-cancels the turn, which cancels the run, which withdraws its requests. Input responses never steer.
+updates the active turn at its next boundary. An `interrupt` message cancels the turn and the
+tool run, withdrawing its requests. Input responses never steer.
 
 Background runs belong to the session. They survive turn completion and cancellation, appear in the
 session's task index, can be cancelled with `task_cancel`, and are cancelled when the session ends.

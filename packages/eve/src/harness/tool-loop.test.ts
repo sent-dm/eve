@@ -52,6 +52,7 @@ import type { ChannelAudience } from "#shared/channel-audience.js";
 import type { InstrumentationDecision } from "#shared/instrumentation-decision.js";
 import { compactMessages, shouldCompact } from "#harness/compaction.js";
 import {
+  advanceStep,
   getHarnessEmissionState,
   isHarnessBetweenTurns,
   setHarnessEmissionState,
@@ -72,6 +73,7 @@ import { AGENT_HANDLES_STATE_KEY } from "#subagents/handles/store.js";
 import { BackgroundToolExecutorKey } from "#harness/background-tools.js";
 import { stashToolInterrupt } from "#harness/tool-interrupts.js";
 import { appendMissingToolResultMessages, createToolLoopHarness } from "#harness/tool-loop.js";
+import { setEveAttributes } from "#runtime/attributes/emit.js";
 import { isSessionLimitDecline, TurnCancelledError } from "#harness/turn-cancellation.js";
 import {
   getSessionUsageLimitViolation,
@@ -139,6 +141,54 @@ let declaredAudience: ChannelAudience = "unknown";
 let declaredDecision: InstrumentationDecision | undefined;
 let declaredInstrumentation: SessionInstrumentation | undefined;
 let declaredRuntime: InstrumentationRuntime | undefined;
+
+vi.mock("#runtime/attributes/emit.js", () => ({ setEveAttributes: vi.fn(async () => {}) }));
+
+it.each([false, true])(
+  "flushes model settlement during attribute writes and joins them before returning (failure=%s)",
+  async (failSettlement) => {
+    setupMockAgent({
+      finishReason: "stop",
+      response: { messages: [{ content: "Hello!", role: "assistant" }] },
+      text: "Hello!",
+      toolCalls: [],
+      toolResults: [],
+      usage: { inputTokens: 123 },
+    });
+    const attributes = Promise.withResolvers<void>();
+    const settlement = Promise.withResolvers<void>();
+    const failure = new Error("Settlement failed");
+    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    const run = createToolLoopHarness(
+      createTestConfig("conversation", async () => {}, {
+        handleSettlement: async () => {
+          settlement.resolve();
+          if (failSettlement) throw failure;
+        },
+      }),
+    );
+    let finished = false;
+    const result = contextStorage
+      .run(new ContextContainer(), () => run(createTestSession(), { message: "hello" }))
+      .then(
+        (value) => {
+          finished = true;
+          return { value };
+        },
+        (error: unknown) => {
+          finished = true;
+          return { error };
+        },
+      );
+    await settlement.promise;
+    expect(setEveAttributes).toHaveBeenCalled();
+    expect(finished).toBe(false);
+    attributes.resolve();
+    const outcome = await result;
+    if (failSettlement) expect(outcome).toEqual({ error: failure });
+    else expect(outcome).toHaveProperty("value.session");
+  },
+);
 
 function createInstrumentationContext(
   decision: InstrumentationDecision | undefined,
@@ -809,7 +859,7 @@ function createGatewayModelCallError(input: {
 }
 
 describe("createToolLoopHarness", () => {
-  it("proposes settlement while streaming progress and retaining the active turn", async () => {
+  it("accepts steering while retaining one active turn and withholding settlement", async () => {
     setupMockAgent({
       finishReason: "stop",
       response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -852,6 +902,39 @@ describe("createToolLoopHarness", () => {
     ]);
     expect(getHarnessEmissionState(result.session.state).turnId).toBe("turn_owner");
     expect(result.settledTurn).toEqual({ output: "Hello!" });
+
+    const steered = await run(
+      setHarnessEmissionState(
+        result.session,
+        advanceStep(getHarnessEmissionState(result.session.state)),
+      ),
+      { message: "Consider this too" },
+    );
+    expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
+    expect(
+      events.filter((event) => event.type === "message.received").map((event) => event.data),
+    ).toEqual([
+      expect.objectContaining({ message: "Hello", sequence: 0, turnId: "turn_owner" }),
+      expect.objectContaining({ message: "Consider this too", sequence: 0, turnId: "turn_owner" }),
+    ]);
+    expect(
+      events.filter((event) => event.type === "step.started").map((event) => event.data),
+    ).toEqual([
+      expect.objectContaining({ stepIndex: 0, turnId: "turn_owner" }),
+      expect.objectContaining({ stepIndex: 1, turnId: "turn_owner" }),
+    ]);
+    expect(
+      events.some((event) => event.type === "turn.completed" || event.type === "session.waiting"),
+    ).toBe(false);
+    expect(proposals).toHaveLength(2);
+    expect(proposals[1]?.events).toContainEqual({
+      type: "turn.completed",
+      data: { sequence: 0, turnId: "turn_owner" },
+    });
+    expect(steered.session.history.filter((message) => message.role === "user")).toEqual([
+      { content: "Hello", role: "user" },
+      { content: "Consider this too", role: "user" },
+    ]);
   });
 
   it("uses one projected history view for step consumers while preserving raw history", async () => {

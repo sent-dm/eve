@@ -1,4 +1,4 @@
-import { defineEval } from "eve/evals";
+import { defineEval, type EveEvalTurn } from "eve/evals";
 import { satisfies } from "eve/evals/expect";
 
 const PROGRESS = "EXPORT-PROGRESS";
@@ -19,16 +19,19 @@ export default defineEval({
     const sessionId = t.sessionId;
     if (sessionId === undefined) throw new Error("Eval has no parent session id.");
 
-    const updateLive = t.target.watchTurn(sessionId, {
-      startIndex: requireStreamIndex(t, "update wait"),
-    });
-    const updateTurn = await updateLive.result();
-    updateTurn.expectOk();
-    updateTurn.messageIncludes("BACKGROUND-EXPORT-UPDATE-RECEIVED");
+    const events = [...started.events];
+    let streamIndex = requireStreamIndex(t, "task updates");
+    for (let turn = 0; turn < 2 && !hasCompletion(events); turn++) {
+      const live = t.target.watchTurn(sessionId, { startIndex: streamIndex });
+      const result = await live.result();
+      result.expectOk();
+      events.push(...result.events);
+      streamIndex = requireStreamIndex(live.session, "task updates");
+    }
     await t.require(
-      updateTurn.events,
+      events,
       satisfies(
-        (events: typeof updateTurn.events) =>
+        (events: typeof started.events) =>
           events.some(
             (event) =>
               event.type === "message.received" &&
@@ -39,17 +42,14 @@ export default defineEval({
         "parent receives the executor update with task identity",
       ),
     );
-
-    const doneLive = t.target.watchTurn(sessionId, {
-      startIndex: requireStreamIndex(updateLive.session, "completion wait"),
-    });
-    const doneTurn = await doneLive.result();
-    doneTurn.expectOk();
-    doneTurn.messageIncludes("BACKGROUND-EXPORT-DONE");
     await t.require(
-      doneTurn.events,
+      events,
+      satisfies(hasCompletion, "parent acknowledges the executor completion"),
+    );
+    await t.require(
+      events,
       satisfies(
-        (events: typeof doneTurn.events) =>
+        (events: typeof started.events) =>
           events.some(
             (event) =>
               event.type === "message.received" &&
@@ -59,6 +59,18 @@ export default defineEval({
               messageText(event.data.message).includes(RESULT),
           ),
         "parent receives the executor completion with task identity",
+      ),
+    );
+    const received = events
+      .filter((event) => event.type === "message.received")
+      .map((event) => messageText(event.data.message))
+      .join("\n");
+    await t.require(
+      received,
+      satisfies(
+        (text: string) =>
+          text.indexOf(PROGRESS) >= 0 && text.indexOf(PROGRESS) < text.indexOf(RESULT),
+        "the progress delivery precedes completion, including when coalesced",
       ),
     );
     t.noFailedActions();
@@ -93,4 +105,12 @@ function messageText(message: unknown): string {
         : [],
     )
     .join("\n");
+}
+
+function hasCompletion(events: EveEvalTurn["events"]): boolean {
+  return events.some(
+    (event) =>
+      event.type === "message.completed" &&
+      (event.data.message ?? "").includes("BACKGROUND-EXPORT-DONE"),
+  );
 }

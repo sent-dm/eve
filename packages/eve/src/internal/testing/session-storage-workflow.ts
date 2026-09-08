@@ -77,7 +77,7 @@ async function contributeStorageFixtureStep(input: {
     markers,
     state: new Map([[input.marker, bytes]]),
   } satisfies SessionStorageFixtureCheckpoint);
-  await sessionEvents.withWriter(resources.events, async (writable) => {
+  await sessionEvents.open(resources.events).withWriter(async (writable) => {
     const writer = writable.getWriter();
     try {
       await writer.write(
@@ -126,6 +126,6 @@ export async function sessionStorageCloseFixtureWorkflow(holderRunId: string): P
 async function closeStorageFixtureStep(holderRunId: string): Promise<void> {
   "use step";
   const resources: SessionResources = await sessionDirectory.resolveHolder(holderRunId);
-  await sessionEvents.close(resources.events);
+  await sessionEvents.open(resources.events).close();
   await sessionSnapshots.close(resources.snapshots);
 }
