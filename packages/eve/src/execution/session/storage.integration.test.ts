@@ -31,7 +31,7 @@ describe("session storage through native independent workflow contributors", () 
   });
   afterAll(() => setWorld(previousWorld));
 
-  it("rejects a nonexistent holder without waiting for a descriptor", async () => {
+  it("preserves the missing-holder error after the bounded descriptor read", async () => {
     await expect(sessionDirectory.resolveHolder("missing-holder")).rejects.toMatchObject({
       name: "WorkflowRunNotFoundError",
     });

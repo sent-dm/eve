@@ -30,7 +30,10 @@ import type { RuntimeCompiledArtifactsSource } from "#runtime/compiled-artifacts
 import { getCompiledRuntimeAgentBundle } from "#runtime/sessions/compiled-agent-cache.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
 
-const getHookByTokenMock = vi.fn();
+const getRawHookByTokenMock = vi.fn();
+const workflowWorld = {
+  hooks: { getByToken: (...args: unknown[]) => getRawHookByTokenMock(...args) },
+};
 const getRunMock = vi.fn();
 const cancelRunMock = vi.fn();
 const startMock = vi.fn();
@@ -49,9 +52,8 @@ const session = {
 
 vi.mock("#compiled/@workflow/core/runtime.js", () => ({
   cancelRun: (...args: unknown[]) => cancelRunMock(...args),
-  getHookByToken: (...args: unknown[]) => getHookByTokenMock(...args),
   getRun: (...args: unknown[]) => getRunMock(...args),
-  getWorld: async () => "world",
+  getWorld: async () => workflowWorld,
   start: (...args: unknown[]) => startMock(...args),
 }));
 vi.mock("#execution/session/directory.js", () => ({
@@ -84,7 +86,7 @@ beforeEach(() => {
   getRunMock.mockReturnValue({ returnValue: Promise.resolve({ terminal: false }) });
   resolveHolderMock.mockResolvedValue(session);
   resolveSessionMock.mockResolvedValue(session);
-  getHookByTokenMock.mockResolvedValue({ runId: "holder-1" });
+  getRawHookByTokenMock.mockResolvedValue({ runId: "holder-1" });
   startMock.mockResolvedValue({
     runId: "candidate-1",
     returnValue: Promise.resolve({ terminal: false }),
@@ -169,7 +171,7 @@ describe("session ingress", () => {
     await expect(
       runtime().dispatchContinuation({ continuationToken: "slack:thread", command }),
     ).resolves.toEqual({ status: "accepted", sessionId: "holder-1" });
-    expect(getHookByTokenMock).toHaveBeenCalledWith("slack:thread");
+    expect(getRawHookByTokenMock).toHaveBeenCalledWith("slack:thread");
     expect(resolveHolderMock).not.toHaveBeenCalled();
     expect(startMock).toHaveBeenCalledWith(
       turnWorkflowReference,
@@ -188,7 +190,7 @@ describe("session ingress", () => {
     expect(resolveSessionMock).not.toHaveBeenCalled();
     expect(resolveHolderMock).not.toHaveBeenCalled();
     expect(getRunMock).not.toHaveBeenCalled();
-    expect(getHookByTokenMock).not.toHaveBeenCalled();
+    expect(getRawHookByTokenMock).not.toHaveBeenCalled();
     expect(startMock).toHaveBeenCalledWith(turnWorkflowReference, [
       {
         sessionId: "public-id",
@@ -245,7 +247,7 @@ describe("session ingress", () => {
       "expiry-id",
     );
     expect(resolveSessionMock).not.toHaveBeenCalled();
-    expect(getHookByTokenMock).not.toHaveBeenCalled();
+    expect(getRawHookByTokenMock).not.toHaveBeenCalled();
     expect(startMock.mock.calls[0]?.[1][0].submission.eventId).toBe("expiry-id");
   });
 
@@ -256,7 +258,7 @@ describe("session ingress", () => {
     { command: { kind: "compact" as const }, status: "no_active_session" },
     { command: { kind: "reset" as const }, status: "no_active_session" },
   ])("maps missing $command.kind targets without starting work", async ({ command, status }) => {
-    getHookByTokenMock.mockRejectedValueOnce(new HookNotFoundError("missing"));
+    getRawHookByTokenMock.mockRejectedValueOnce(new HookNotFoundError("missing"));
     await expect(
       runtime().dispatchContinuation({ continuationToken: "missing", command }),
     ).resolves.toEqual({ status });
@@ -364,20 +366,22 @@ describe("session ingress", () => {
           ? { previousSessionId: "session", status: "reset" }
           : { sessionId: "session", status: "accepted" },
       );
-      expect(getHookByTokenMock).not.toHaveBeenCalled();
+      expect(getRawHookByTokenMock).not.toHaveBeenCalled();
     },
   );
 });
 
 describe("holder creation", () => {
-  it("returns an unaliased session's allocated stream without waiting for bootstrap", async () => {
+  it("returns an unaliased session before resolving its stream resources", async () => {
     const handle = await runtime().createSession(createInput());
     expect(handle.sessionId).toBe("candidate-1");
     expect(resolveHolderMock).not.toHaveBeenCalled();
     expect(getRunMock).not.toHaveBeenCalled();
     expect(readEventsMock).not.toHaveBeenCalled();
     void handle.events;
-    expect(readEventsMock).toHaveBeenCalledWith({ id: '["candidate-1",null]' });
+    expect(resolveHolderMock).toHaveBeenCalledExactlyOnceWith("candidate-1");
+    expect(readEventsMock).toHaveBeenCalledWith(expect.any(Promise));
+    await expect(readEventsMock.mock.calls[0]![0]).resolves.toEqual(session.events);
   });
 
   it("starts only the holder and places initialization in its first submission", async () => {
@@ -411,7 +415,7 @@ describe("holder creation", () => {
     expect(resolveHolderMock).toHaveBeenCalledWith("candidate-1");
     expect(handle.sessionId).toBe("session-1");
     expect(readEventsMock).not.toHaveBeenCalled();
-    expect(getHookByTokenMock).not.toHaveBeenCalled();
+    expect(getRawHookByTokenMock).not.toHaveBeenCalled();
   });
 
   it("deduplicates repeated create-once submissions without exposing the alias", async () => {
@@ -487,7 +491,7 @@ describe("holder creation", () => {
     await expect(
       runtime().createSession({ ...createInput(), adapter: activityAdapter }),
     ).rejects.toBe(failure);
-    expect(cancelRunMock).toHaveBeenCalledWith("world", "collector", {
+    expect(cancelRunMock).toHaveBeenCalledWith(workflowWorld, "collector", {
       cancelReason: "Root session creation did not complete",
     });
   });
@@ -501,7 +505,7 @@ describe("resource-based reads", () => {
     expect(resolveHolderMock).not.toHaveBeenCalled();
   });
   it("returns absence only for an unclaimed provider alias", async () => {
-    getHookByTokenMock.mockRejectedValueOnce(new HookNotFoundError("missing"));
+    getRawHookByTokenMock.mockRejectedValueOnce(new HookNotFoundError("missing"));
     await expect(runtime().resolveContinuation("missing")).resolves.toBeUndefined();
   });
   it("reads events and cursors from the descriptor's event reference", async () => {

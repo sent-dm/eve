@@ -482,7 +482,10 @@ export async function runModel(rawInput: ModelInput): Promise<ModelResult> {
       const retained = readRetainedBackgroundToolResult(ctx);
       const cancelledSession = await contextStorage.run(ctx, async () => {
         const preserved = await preserveCancelledTurnMessage(
-          retained?.backgroundTaskSession ?? initialSession,
+          setHarnessEmissionState(
+            retained?.backgroundTaskSession ?? initialSession,
+            eventSink.emissionState,
+          ),
           resolved,
         );
         const sandbox = ctx.get(SandboxKey);
@@ -508,10 +511,13 @@ export async function runModel(rawInput: ModelInput): Promise<ModelResult> {
     const cancellationState = createDurableSessionState({
       session: await contextStorage.run(ctx, () =>
         preserveCancelledTurnMessage(
-          {
-            ...(retained?.backgroundTaskSession ?? initialSession),
-            sandboxState: stepResult.session.sandboxState,
-          },
+          setHarnessEmissionState(
+            {
+              ...(retained?.backgroundTaskSession ?? initialSession),
+              sandboxState: stepResult.session.sandboxState,
+            },
+            eventSink.emissionState,
+          ),
           resolved,
         ),
       ),

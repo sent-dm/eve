@@ -7,6 +7,10 @@ import type {
   TurnSettlementKind,
 } from "#execution/turn/types.js";
 
+export function turnTaskId(checkpoint: InitializedSessionCheckpoint): string | undefined {
+  return checkpoint.caller?.taskId ?? checkpoint.state.snapshot.session.taskId;
+}
+
 export function commandDelivery(submission: AcceptedSubmission): DeliverHookPayload {
   if (submission.command.kind !== "send") throw new Error("Expected a message submission.");
   const command = submission.command;
@@ -122,7 +126,7 @@ export function retireTaskSubmissions(
   const queue = checkpoint.queue.filter(retain);
   const inputs = checkpoint.inputs?.filter(retain);
   deliveries[submission.eventId] =
-    cancelledInputs.size > 0 || (matchesTurn && checkpoint.caller?.taskId === command.taskId)
+    cancelledInputs.size > 0 || (matchesTurn && turnTaskId(checkpoint) === command.taskId)
       ? "applied"
       : "retired";
   return { ...checkpoint, queue, inputs, deliveries };

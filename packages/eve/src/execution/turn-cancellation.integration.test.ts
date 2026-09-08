@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getWorld, getHookByToken } from "#internal/workflow/runtime.js";
+import { getWorld, getRawHookByToken } from "#internal/workflow/runtime.js";
 
 import { createTestRuntime, type TestRuntime } from "#internal/testing/app-harness.js";
 import { mockChannelContext } from "#internal/testing/mocks/mock-channel-operations.js";
@@ -132,7 +132,7 @@ async function createWaitToolRuntime(agentName: string): Promise<WaitToolFixture
 }
 
 async function requireHookOwner(token: string): Promise<{ runId: string }> {
-  return await getHookByToken(token);
+  return await getRawHookByToken(token);
 }
 
 /**
@@ -331,6 +331,7 @@ describe("turn cancellation integration", () => {
           { data: { turnId: starts[1]!.data.turnId } },
         ]);
         expect(filterEventsByType(continuation, "session.waiting")).toHaveLength(1);
+        expect(filterEventsByType(continuation, "session.started")).toHaveLength(1);
         expect(filterEventsByType(continuation, "turn.cancelled")).toHaveLength(0);
         expectNoFailureEvents(continuation);
         expect(
@@ -635,7 +636,7 @@ describe("turn cancellation integration", () => {
           .childSessionId;
         expect(childSessionId).toBeDefined();
         expect(
-          await getHookByToken(activeTurnToken(childSessionId ?? "")).catch(() => null),
+          await getRawHookByToken(activeTurnToken(childSessionId ?? "")).catch(() => null),
         ).toBeNull();
         expect(fixture.toolAborts()).toBe(1);
 
@@ -897,7 +898,9 @@ describe("turn cancellation integration", () => {
           .latest;
         if (stored === undefined) throw new Error("Expected a settled checkpoint.");
         await waitForTurnReceipt(stored.checkpoint.writerRunId);
-        expect(await getHookByToken(activeTurnToken(run.sessionId)).catch(() => null)).toBeNull();
+        expect(
+          await getRawHookByToken(activeTurnToken(run.sessionId)).catch(() => null),
+        ).toBeNull();
         const world = await getWorld();
         const runs = await world.runs.list({ pagination: { limit: 100 } });
         expect(

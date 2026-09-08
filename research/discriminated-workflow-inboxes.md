@@ -639,9 +639,16 @@ An explicit storage scope now shares those Run instances across a step's event a
 snapshot adapters, reducing the count to 12: two metadata reads, two payload reads,
 seven single writes, and one batched write. The scope ends with the step and never
 enters workflow history. The turn also registers its ownership and cancellation
-hooks in the same activation, before awaiting the ownership claim. Attribute writes
-overlap independent checkpoint or settlement work and are joined before the step
-returns.
+hooks in the same activation, before awaiting the ownership claim.
+
+Observability attributes start inside the existing Node step and register with the
+host's `waitUntil`; model execution and settlement never await them. They retain
+the calling step's context, but may arrive out of order or be dropped if the run
+finishes first. Authoritative usage remains in the durable snapshot. Initial
+invocation ownership attributes remain atomic with `run_created` because access
+checks depend on them; they add no separate network write. Snapshot commits,
+event delivery, readiness acknowledgements, and child results retain their
+required durable ordering.
 
 Locator-only admission removes descriptor and owner-status reads from HTTP
 follow-ups. Provider ingress performs only its alias lookup before starting a
@@ -667,6 +674,7 @@ Hosted observations of the same deterministic fixture, each with 99 warm turns:
 | [Direct tails and metadata cache](https://github.com/vercel/eve/actions/runs/34259317275/job/102173528095)           | 1,470 ms | 2,265 ms |      452 ms |       373 ms |             4/99 |
 | [Step storage scope and overlapping writes](https://github.com/vercel/eve/actions/runs/34262101510/job/102182828113) | 1,408 ms | 1,871 ms |      401 ms |       348 ms |             2/99 |
 | [In-process hook replay](https://github.com/vercel/eve/actions/runs/34264197868/job/102189665926)                    | 1,145 ms | 1,867 ms |      369 ms |       351 ms |             4/99 |
+| [Direct candidate admission](https://github.com/vercel/eve/actions/runs/34266537084/job/102197665788)                | 1,082 ms | 1,451 ms |      364 ms |       337 ms |             4/99 |
 
 The log and metadata-cache checkpoints passed both sequential and concurrent stress scenarios. These
 are separate hosted observations, not interleaved trials. The abort cleanup
@@ -680,6 +688,10 @@ storage/admission tests pass against that amendment, including a claim-order che
 that the owner hook and first execute step share one activation. Its hosted stress
 run passed both scenarios with a 1,145 ms warm median and 1,867 ms p95; native
 owner creation to execute fell to 285 ms p50. The warm maximum was 20,272 ms.
+Direct admission passed both stress scenarios: warm median 1,082 ms, p95 1,451 ms,
+maximum 1,932 ms; concurrent second turns measured 1,317 ms median and 1,828 ms p95.
+The subsecond requirement remains unmet. Each checkpoint is a separate hosted
+sample; lower outliers in one run do not establish that tail delays are fixed.
 The CI report retains raw client samples and native run/step timings, including
 partial reports when a scenario fails. Event timestamps mark event construction,
 not persistence or client receipt.

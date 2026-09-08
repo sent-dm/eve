@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getHookByToken, type Run } from "#internal/workflow/runtime.js";
+import { getRawHookByToken, type Run } from "#internal/workflow/runtime.js";
 import type { AcceptedSubmission, TurnReceipt } from "#execution/turn/types.js";
 import type { SessionTarget } from "#execution/session/resources.js";
 import { dispatchTurn } from "#execution/session/dispatch.js";
@@ -57,6 +57,6 @@ export async function dispatchSessionCommandByToken(
   const sessionId = readSessionIdFromCommandToken(token);
   if (sessionId !== undefined) return await dispatchSessionCommand(sessionId, command, eventId);
   const submission = acceptSubmission(command, eventId);
-  const hook = await getHookByToken(token);
+  const hook = await getRawHookByToken(token);
   return await dispatchAcceptedSubmission({ sessionId: hook.runId }, submission);
 }

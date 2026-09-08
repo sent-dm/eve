@@ -142,10 +142,10 @@ let declaredDecision: InstrumentationDecision | undefined;
 let declaredInstrumentation: SessionInstrumentation | undefined;
 let declaredRuntime: InstrumentationRuntime | undefined;
 
-vi.mock("#runtime/attributes/emit.js", () => ({ setEveAttributes: vi.fn(async () => {}) }));
+vi.mock("#runtime/attributes/emit.js", () => ({ setEveAttributes: vi.fn() }));
 
 it.each([false, true])(
-  "flushes model settlement during attribute writes and joins them before returning (failure=%s)",
+  "returns model settlement without waiting for attributes (failure=%s)",
   async (failSettlement) => {
     setupMockAgent({
       finishReason: "stop",
@@ -158,7 +158,7 @@ it.each([false, true])(
     const attributes = Promise.withResolvers<void>();
     const settlement = Promise.withResolvers<void>();
     const failure = new Error("Settlement failed");
-    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    vi.mocked(setEveAttributes).mockImplementationOnce(() => attributes.promise);
     const run = createToolLoopHarness(
       createTestConfig("conversation", async () => {}, {
         handleSettlement: async () => {
@@ -167,26 +167,22 @@ it.each([false, true])(
         },
       }),
     );
-    let finished = false;
     const result = contextStorage
       .run(new ContextContainer(), () => run(createTestSession(), { message: "hello" }))
       .then(
         (value) => {
-          finished = true;
           return { value };
         },
         (error: unknown) => {
-          finished = true;
           return { error };
         },
       );
     await settlement.promise;
     expect(setEveAttributes).toHaveBeenCalled();
-    expect(finished).toBe(false);
-    attributes.resolve();
     const outcome = await result;
     if (failSettlement) expect(outcome).toEqual({ error: failure });
     else expect(outcome).toHaveProperty("value.session");
+    attributes.resolve();
   },
 );
 

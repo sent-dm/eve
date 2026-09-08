@@ -1,4 +1,8 @@
-import { admitSubmissions, splitSubmission } from "#execution/turn/submissions.js";
+import {
+  admitSubmissions,
+  splitSubmission,
+  retireTaskSubmissions,
+} from "#execution/turn/submissions.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { executeTurnStep, projectProgress } from "#execution/turn/execute.js";
 import { setEveAttributes } from "#runtime/attributes/emit.js";
@@ -154,6 +158,22 @@ const run = (changes: Partial<Parameters<typeof executeTurnStep>[0]> = {}) =>
   }).then((executed) => executed.result);
 
 describe("turn execution boundary", () => {
+  it("projects and cancels a persisted task without a caller", () => {
+    checkpoint = {
+      ...checkpoint,
+      phase: "running",
+      caller: undefined,
+      state: replaceDurableSessionSnapshot({
+        session: { ...checkpoint.state.snapshot.session, taskId: "standalone" },
+      }),
+    };
+    expect(projectProgress(ref, checkpoint).taskId).toBe("standalone");
+    const cancelled = retireTaskSubmissions(checkpoint, {
+      eventId: "cancel",
+      command: { kind: "cancel", taskId: "standalone" },
+    });
+    expect(cancelled.deliveries.cancel).toBe("applied");
+  });
   it("does not hydrate or fail the session when its resource descriptor is unavailable", async () => {
     mocks.resolveSession.mockRejectedValueOnce(new Error("Descriptor not ready"));
     await expect(run()).rejects.toMatchObject({ name: "SessionStorageUnavailableError" });
@@ -169,10 +189,10 @@ describe("turn execution boundary", () => {
     ).rejects.toThrow("bootstrap submission is missing");
     expect(mocks.create).not.toHaveBeenCalled();
   });
-  it("starts attributes alongside the durable marker and joins both before model effects", async () => {
+  it("starts attributes before the marker and runs the model without waiting for them", async () => {
     const attributes = Promise.withResolvers<void>();
     const marker = Promise.withResolvers<void>();
-    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    vi.mocked(setEveAttributes).mockImplementationOnce(() => attributes.promise);
     mocks.append.mockImplementationOnce(async () => {
       marker.resolve();
       return { streamId: session.snapshots.id, index: 2 };
@@ -180,31 +200,25 @@ describe("turn execution boundary", () => {
     const result = run();
     await marker.promise;
     expect(setEveAttributes).toHaveBeenCalledOnce();
-    expect(mocks.model).not.toHaveBeenCalled();
-    attributes.resolve();
     await result;
     expect(mocks.model).toHaveBeenCalledOnce();
+    attributes.resolve();
   });
 
-  it("joins an in-flight attribute write when the entry marker fails", async () => {
+  it("reports a marker failure without waiting for an in-flight attribute write", async () => {
     const attributes = Promise.withResolvers<void>();
     const marker = Promise.withResolvers<void>();
     const failure = new Error("Marker write failed");
-    vi.mocked(setEveAttributes).mockReturnValueOnce(attributes.promise);
+    vi.mocked(setEveAttributes).mockImplementationOnce(() => attributes.promise);
     mocks.append.mockImplementationOnce(async () => {
       marker.resolve();
       throw failure;
     });
-    let finished = false;
-    const result = run().catch((error: unknown) => {
-      finished = true;
-      return error;
-    });
+    const result = run().catch((error: unknown) => error);
     await marker.promise;
-    expect(finished).toBe(false);
-    attributes.resolve();
     expect(await result).toBe(failure);
     expect(mocks.model).not.toHaveBeenCalled();
+    attributes.resolve();
   });
 
   it("hydrates the persisted bootstrap seed and commits before model effects", async () => {
@@ -511,6 +525,46 @@ describe("turn execution boundary", () => {
     const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
     expect(committed.result).toMatchObject({ cancellationState, cancellationContext });
   });
+
+  it.each(["runtime", "answer"] as const)(
+    "settles idle %s progress without fabricating a model turn or dropping child prompts",
+    async (kind) => {
+      const state = { ...checkpoint.state, hasProxyInputRequests: true };
+      mocks.runtime.mockResolvedValue({
+        state,
+        serializedContext: { retained: true },
+        results: [],
+        acceptedAtMsByCallId: {},
+      });
+      mocks.route.mockImplementation(async (input) => ({
+        kind: "continue",
+        remainder: undefined,
+        sessionState: input.sessionState,
+        serializedContext: input.serializedContext,
+      }));
+      const result = await run({
+        submission: {
+          eventId: "progress",
+          command:
+            kind === "runtime"
+              ? { kind: "runtime", payload: { kind: "runtime-action-result", results: [] } }
+              : {
+                  kind: "send",
+                  payload: { inputResponses: [{ requestId: "first", text: "yes" }] },
+                },
+        },
+      });
+      expect(result).toMatchObject({ kind: "progress", progress: { action: "settle" } });
+      expect(mocks.model).not.toHaveBeenCalled();
+      const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
+      expect(committed.state.hasProxyInputRequests).toBe(true);
+      expect(committed.serializedContext).toEqual({ retained: true });
+      expect(committed.result?.settlement?.events.map((event) => event.type)).toEqual([
+        "session.waiting",
+      ]);
+      expect(committed.result?.settlement?.emissionAfter).toEqual(state.emissionState);
+    },
+  );
 
   it("routes answers to a waiting child without running the model or losing queued messages", async () => {
     checkpoint = {

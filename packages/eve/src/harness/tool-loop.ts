@@ -1767,18 +1767,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       }
     }
 
-    // --- Step-side observability tags ---------------------------------------
-    //
-    // Tag the **turn workflow run** (the current `"use step"` is hosted by
-    // that workflow, so `setAttributes` writes to its
-    // attributes table) with the model id and per-turn cumulative token
-    // counts. Per-turn totals are accumulated on `session.state` because
-    // each tool-loop iteration is a fresh `"use step"` and the workflow
-    // runtime's last-write-wins per-key semantics mean only the running
-    // total — not the per-step delta — should reach the dashboard.
-    //
-    // Best-effort: `setEveAttributes` swallows runtime failures so a
-    // broken tag emit can never break the agent loop.
+    // Dashboard counters are best-effort; durable usage remains on session.state.
     const nextTurnUsage = accumulateTurnUsage({
       previous: getTurnUsageState(session.state),
       turnId: emissionState.turnId,
@@ -1798,7 +1787,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     } catch {
       modelTag = undefined;
     }
-    const attributes = setEveAttributes({
+    setEveAttributes({
       "$eve.model": modelTag,
       "$eve.input_tokens": nextTurnUsage.inputTokens,
       "$eve.output_tokens": nextTurnUsage.outputTokens,
@@ -1810,24 +1799,18 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
 
     // --- Handle result ------------------------------------------------------
 
-    try {
-      return await handleStepResult({
-        config,
-        emit,
-        emissionState,
-        durableModelPromptMessageCount:
-          ephemeralContextMessages.length === 0 ? projectedMessages.length : undefined,
-        promptMessages: messages,
-        result,
-        runStep,
-        session,
-        coordinationTools: modelCallCoordinationTools,
-      });
-    } finally {
-      // Settlement can flush its output while tags persist; the next model
-      // step still waits, preserving cumulative attribute write order.
-      await attributes;
-    }
+    return await handleStepResult({
+      config,
+      emit,
+      emissionState,
+      durableModelPromptMessageCount:
+        ephemeralContextMessages.length === 0 ? projectedMessages.length : undefined,
+      promptMessages: messages,
+      result,
+      runStep,
+      session,
+      coordinationTools: modelCallCoordinationTools,
+    });
   }
 
   return runStep;

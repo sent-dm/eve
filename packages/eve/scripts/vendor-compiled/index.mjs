@@ -26,6 +26,7 @@ import opentelemetryOtlpTransformer from "./@opentelemetry/otlp-transformer.mjs"
 import standardSchemaSpec from "./@standard-schema/spec.mjs";
 import vercelBlob from "./@vercel/blob.mjs";
 import vercelDetectAgent from "./@vercel/detect-agent.mjs";
+import vercelFunctions from "./@vercel/functions.mjs";
 import vercelOidc from "./@vercel/oidc.mjs";
 import vercelOtel from "./@vercel/otel.mjs";
 import vercelSandbox from "./@vercel/sandbox.mjs";
@@ -93,6 +94,7 @@ export const MODULES = [
   turndown,
   vercelBlob,
   vercelDetectAgent,
+  vercelFunctions,
   vercelOidc,
   vercelOtel,
   vercelSandbox,

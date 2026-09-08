@@ -8,8 +8,8 @@ import { parseWithNitroRolldownAst } from "#internal/bundler/nitro-rolldown.js";
 import type { WorkflowManifest } from "./workflow-builders.js";
 
 // Step names whose `stepId` must be emitted as the bare function name,
-// not `step//<idBase>//<name>`. The Workflow SDK's `setAttributes`
-// dispatches builtins via `useStep("<name>")` with the unqualified
+// not `step//<idBase>//<name>`. The Workflow SDK
+// dispatches response builtins via `useStep("<name>")` with the unqualified
 // identifier — if the registry stored these under their version-stamped
 // `step//...//name` ids, the lookup would miss and the runtime would
 // raise `Step "__builtin_*" is not registered in the current deployment`.
@@ -17,7 +17,6 @@ const BUILTIN_STEP_NAMES = new Set([
   "__builtin_response_array_buffer",
   "__builtin_response_json",
   "__builtin_response_text",
-  "__builtin_set_attributes",
 ]);
 
 type WorkflowDirectiveMode = "workflow" | "step" | "client" | false;

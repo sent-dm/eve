@@ -7,6 +7,7 @@ import {
   commandDelivery,
   admitSubmissions,
   retireTaskSubmissions,
+  turnTaskId,
 } from "#execution/turn/submissions.js";
 import { getStepMetadata } from "#compiled/@workflow/core/index.js";
 import type { DeliverHookPayload, HookPayload } from "#channel/types.js";
@@ -49,6 +50,7 @@ import { startSessionTimeout } from "#execution/session-timeout-steps.js";
 import { sessionCommandToken } from "#execution/session-command-token.js";
 import { DEFAULT_SESSION_TIMEOUT_MS } from "#execution/session-timeout.js";
 import { advanceStep } from "#harness/emission.js";
+import { createSessionWaitingEvent, stampMessageStreamEvent } from "#protocol/message.js";
 
 export interface ExecuteTurnInput extends SessionTarget {
   readonly owner: InboxAddress;
@@ -131,7 +133,7 @@ async function executeTurn(
       const interruption = interruptionKind(
         input.submission,
         `turn_${input.owner.ownerRunId}`,
-        checkpoint.caller?.taskId ?? firstTurn.initial.taskId,
+        turnTaskId(checkpoint),
       );
       if (interruption !== undefined || input.submission.command.kind === "session-timeout") {
         checkpoint = {
@@ -222,24 +224,17 @@ async function executeTurn(
     phase: "running",
     writeId: `${writeId}:entered`,
   };
-  const entry = await Promise.allSettled([
-    snapshots.begin(writeId, checkpoint, previous?.ref),
-    input.checkpoint === undefined
-      ? setEveAttributes(
-          buildTurnAttributes({
-            parentSessionId: input.session.sessionId,
-            rootSessionId:
-              readRootSessionId(checkpoint.serializedContext) ?? input.session.sessionId,
-            requestId:
-              input.submission.command.kind === "send"
-                ? input.submission.command.requestId
-                : undefined,
-            serializedContext: checkpoint.serializedContext,
-          }),
-        )
-      : undefined,
-  ]);
-  for (const result of entry) if (result.status === "rejected") throw result.reason;
+  if (input.checkpoint === undefined)
+    setEveAttributes(
+      buildTurnAttributes({
+        parentSessionId: input.session.sessionId,
+        rootSessionId: readRootSessionId(checkpoint.serializedContext) ?? input.session.sessionId,
+        requestId:
+          input.submission.command.kind === "send" ? input.submission.command.requestId : undefined,
+        serializedContext: checkpoint.serializedContext,
+      }),
+    );
+  await snapshots.begin(writeId, checkpoint, previous?.ref);
   // Choosing another execution boundary admits the preceding model proposal.
   // Its rollback must not erase tools or child handles committed afterward.
   if (checkpoint.result !== undefined) {
@@ -359,7 +354,7 @@ async function executeTurn(
               ...state,
               deliveries: applied,
               inputs: remaining,
-              result: parkedResult(state),
+              result: idleResult(state),
             };
           } else {
             return {
@@ -396,7 +391,7 @@ async function executeTurn(
           ...state,
           deliveries: applied,
           inputs: remaining,
-          result: state.result ?? parkedResult(state),
+          result: state.result ?? idleResult(state),
         };
       }
     }
@@ -405,7 +400,7 @@ async function executeTurn(
         ...state,
         deliveries: applied,
         inputs: remaining,
-        result: state.result ?? parkedResult(state),
+        result: state.result ?? idleResult(state),
       };
     }
     if (state.result?.settlement !== undefined) {
@@ -464,11 +459,18 @@ function isRuntimeEvent(payload: HookPayload): boolean {
   );
 }
 
-function parkedResult(checkpoint: InitializedSessionCheckpoint) {
+// Runtime-only progress settles independently while durable child prompts remain answerable.
+function idleResult(checkpoint: InitializedSessionCheckpoint) {
   return {
     action: "park" as const,
     hasPendingAuthorization: false,
     hasPendingInputBatch: false,
+    settlement: {
+      events: [
+        stampMessageStreamEvent(createSessionWaitingEvent(checkpoint.state.continuationToken)),
+      ],
+      emissionAfter: checkpoint.state.emissionState,
+    },
     sessionState: checkpoint.state,
     serializedContext: checkpoint.serializedContext,
   };
@@ -547,7 +549,7 @@ export function projectProgress(
   return {
     checkpoint: ref,
     turnId: checkpoint.state.emissionState.turnId || `turn_${checkpoint.writerRunId}`,
-    taskId: checkpoint.caller?.taskId,
+    taskId: turnTaskId(checkpoint),
     action: nextAction(checkpoint, pendingCallIds),
     terminal: result?.action === "done",
     pendingCallIds,

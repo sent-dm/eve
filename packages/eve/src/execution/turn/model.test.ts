@@ -36,7 +36,12 @@ import { getProxyInputRequests, upsertProxyInputRequests } from "#harness/proxy-
 import { appendPendingInputBatch } from "#harness/input-requests.js";
 import type { HarnessSession, StepResult } from "#harness/types.js";
 import { createEmptyHookRegistry } from "#runtime/hooks/registry.js";
-import { createInputRequestedEvent } from "#protocol/message.js";
+import {
+  createInputRequestedEvent,
+  createSessionStartedEvent,
+  createStepStartedEvent,
+  createTurnStartedEvent,
+} from "#protocol/message.js";
 import { getCompiledRuntimeAgentBundle } from "#runtime/sessions/compiled-agent-cache.js";
 import {
   createDurableSessionState,
@@ -152,7 +157,7 @@ vi.mock("#runtime/sessions/compiled-agent-cache.js", () => ({
 }));
 
 vi.mock("#compiled/@workflow/core/runtime.js", () => ({
-  getHookByToken: vi.fn(async (token: string) => currentSessionHook(token)),
+  getWorld: async () => ({ hooks: { getByToken: (token: string) => currentSessionHook(token) } }),
   getRun: (...args: unknown[]) => getRunMock(...args),
   resumeHook: (...args: unknown[]) => resumeHookMock(...args),
   start: (...args: unknown[]) => startMock(...args),
@@ -1254,7 +1259,7 @@ describe("runModel", () => {
   });
 
   it.each([false, true])(
-    "preserves file input and the current sandbox in cancellation state (cancelled=%s)",
+    "preserves published identity, file input and sandbox on rollback (cancelled=%s)",
     async (cancelled) => {
       const adapter: ChannelAdapter = { kind: "file-test" };
       mockSessionReads([createStubSession()]);
@@ -1280,11 +1285,28 @@ describe("runModel", () => {
       };
       const get = vi.fn(async () => null);
       const captureState = vi.fn(async () => sandboxState);
-      vi.mocked(createExecutionNodeStep).mockImplementation(() => async (session) => {
-        loadContext().setVirtualContext(SandboxKey, { captureState, get, stop: async () => {} });
-        if (cancelled) throw new TurnCancelledError();
-        return { next: null, session };
-      });
+      vi.mocked(createExecutionNodeStep).mockImplementation(
+        ({ handleEvent }) =>
+          async (session) => {
+            loadContext().setVirtualContext(SandboxKey, {
+              captureState,
+              get,
+              stop: async () => {},
+            });
+            await handleEvent!(createSessionStartedEvent());
+            await handleEvent!(createTurnStartedEvent({ turnId: "turn-visible", sequence: 2 }));
+            await handleEvent!(
+              createStepStartedEvent({
+                turnId: "turn-visible",
+                sequence: 2,
+                stepIndex: 3,
+                modelId: "test",
+              }),
+            );
+            if (cancelled) throw new TurnCancelledError();
+            return { next: null, session };
+          },
+      );
       const message = [
         { type: "file" as const, mediaType: "image/png", data: new Uint8Array([1, 2]) },
       ];
@@ -1303,6 +1325,12 @@ describe("runModel", () => {
       expect(retained?.snapshot.session).toMatchObject({
         sandboxState,
         history: [{ role: "user", content: message }],
+      });
+      expect(retained?.emissionState).toEqual({
+        sessionStarted: true,
+        turnId: "turn-visible",
+        sequence: 2,
+        stepIndex: 3,
       });
       expect(get).toHaveBeenCalledOnce();
       expect(captureState).toHaveBeenCalledOnce();

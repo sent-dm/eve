@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseNdjsonStream } from "#execution/ndjson-stream.js";
 
@@ -20,6 +20,20 @@ async function drain<T>(stream: ReadableStream<T>): Promise<T[]> {
 }
 
 describe("parseNdjsonStream", () => {
+  it("cancels a source that resolves after its consumer disconnects", async () => {
+    const source = Promise.withResolvers<ReadableStream<Uint8Array>>();
+    const cancel = vi.fn();
+    const stream = parseNdjsonStream(() => source.promise);
+    await stream.cancel("disconnected");
+    source.resolve(new ReadableStream({ cancel }));
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledExactlyOnceWith("disconnected"));
+  });
+
+  it("surfaces asynchronous source resolution errors", async () => {
+    const failure = new Error("Resource descriptor unavailable");
+    await expect(drain(parseNdjsonStream(() => Promise.reject(failure)))).rejects.toBe(failure);
+  });
+
   it("parses newline-delimited JSON into values", async () => {
     const source = new ReadableStream<Uint8Array>({
       start(controller) {

@@ -39,7 +39,7 @@ import {
   readParentLineage,
 } from "#execution/eve-workflow-attributes.js";
 import { createLogger, logError } from "#internal/logging.js";
-import { cancelRun, getHookByToken, getWorld } from "#internal/workflow/runtime.js";
+import { cancelRun, getRawHookByToken, getWorld } from "#internal/workflow/runtime.js";
 import type { MessageStreamEvent } from "#protocol/message.js";
 import type { RuntimeCompiledArtifactsSource } from "#runtime/compiled-artifacts-source.js";
 import { ROOT_RUNTIME_AGENT_NODE_ID } from "#runtime/graph.js";
@@ -49,7 +49,6 @@ import { buildRunContext } from "#execution/runtime-context.js";
 import { resolveEffectiveAgentRuntime } from "#execution/effective-agent-config.js";
 import type { HoldingWorkflowInput } from "#execution/session/holding-workflow.js";
 import { sessionDirectory } from "#execution/session/directory.js";
-import { createSessionResources } from "#execution/session/resources.js";
 import { sessionEvents } from "#execution/session/events.js";
 import { waitForTurnReceipt } from "#execution/turn/admission.js";
 import { sessionCallbackToTurnCaller } from "#channel/session.js";
@@ -198,18 +197,21 @@ export function createWorkflowRuntime(config: {
       }
 
       // Without an initial alias, this holder cannot redirect to another session.
-      // Return its allocated stream address while durable bootstrap proceeds.
+      // Resolve stream resources only when the caller consumes events.
       const session =
         workflowInput.initialToken === undefined
-          ? createSessionResources(run.runId, workflowInput.firstTurn.eventId)
+          ? undefined
           : await sessionDirectory.resolveHolder(run.runId);
       let events: ReadableStream<MessageStreamEvent> | undefined;
       return {
         get events() {
-          events ??= sessionEvents.read(session.events);
+          events ??= sessionEvents.read(
+            session?.events ??
+              sessionDirectory.resolveHolder(run.runId).then((resources) => resources.events),
+          );
           return events;
         },
-        sessionId: session.sessionId,
+        sessionId: session?.sessionId ?? run.runId,
       };
     },
 
@@ -246,7 +248,7 @@ export function createWorkflowRuntime(config: {
       continuationToken: string,
     ): Promise<{ sessionId: string } | undefined> {
       try {
-        const hook = await getHookByToken(continuationToken);
+        const hook = await getRawHookByToken(continuationToken);
         return { sessionId: hook.runId };
       } catch (error) {
         if (HookNotFoundError.is(error)) {

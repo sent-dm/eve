@@ -1,13 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { waitUntil } from "#compiled/@vercel/functions/index.js";
+import type { EveAttributeValue } from "#runtime/attributes/normalize.js";
 
 const setAttributesMock = vi.fn();
 
 vi.mock("#compiled/@workflow/core/index.js", () => ({
   setAttributes: (...args: unknown[]) => setAttributesMock(...args),
 }));
+vi.mock("#compiled/@vercel/functions/index.js", () => ({ waitUntil: vi.fn() }));
 
 const { EVE_ATTRIBUTE_VALUE_MAX_BYTES, setEveAttributes, truncateForTag } =
   await import("#runtime/attributes/emit.js");
+
+async function emitAndFlush(attrs: Record<string, EveAttributeValue>): Promise<void> {
+  setEveAttributes(attrs);
+  await Promise.all(vi.mocked(waitUntil).mock.calls.map(([task]) => task));
+}
 
 describe("truncateForTag", () => {
   it("returns the value unchanged when it fits within the byte budget", () => {
@@ -45,6 +53,7 @@ describe("setEveAttributes", () => {
   beforeEach(() => {
     setAttributesMock.mockReset();
     setAttributesMock.mockResolvedValue(undefined);
+    vi.mocked(waitUntil).mockReset();
   });
 
   afterEach(() => {
@@ -52,7 +61,7 @@ describe("setEveAttributes", () => {
   });
 
   it("forwards normalized attributes with allowReservedAttributes opt-in", async () => {
-    await setEveAttributes({ "$eve.parent": "wrun_parent", "$eve.tool_count": 3 });
+    await emitAndFlush({ "$eve.parent": "wrun_parent", "$eve.tool_count": 3 });
 
     expect(setAttributesMock).toHaveBeenCalledTimes(1);
     expect(setAttributesMock).toHaveBeenCalledWith(
@@ -62,7 +71,7 @@ describe("setEveAttributes", () => {
   });
 
   it('stringifies boolean attribute values as "true"/"false"', async () => {
-    await setEveAttributes({ "$eve.is_trace_content_visible": true, "$eve.flag": false });
+    await emitAndFlush({ "$eve.is_trace_content_visible": true, "$eve.flag": false });
 
     expect(setAttributesMock).toHaveBeenCalledTimes(1);
     expect(setAttributesMock).toHaveBeenCalledWith(
@@ -72,7 +81,7 @@ describe("setEveAttributes", () => {
   });
 
   it("drops undefined values so callers can build sparse attribute maps", async () => {
-    await setEveAttributes({
+    await emitAndFlush({
       "$eve.parent": "wrun_parent",
       "$eve.subagent": undefined,
     });
@@ -84,13 +93,13 @@ describe("setEveAttributes", () => {
   });
 
   it("skips the runtime call entirely when every value is undefined", async () => {
-    await setEveAttributes({ "$eve.subagent": undefined });
+    await emitAndFlush({ "$eve.subagent": undefined });
     expect(setAttributesMock).not.toHaveBeenCalled();
   });
 
   it("truncates long string values to the per-attribute byte budget", async () => {
     const longTitle = "x".repeat(EVE_ATTRIBUTE_VALUE_MAX_BYTES + 10);
-    await setEveAttributes({ "$eve.title": longTitle });
+    await emitAndFlush({ "$eve.title": longTitle });
 
     expect(setAttributesMock).toHaveBeenCalledTimes(1);
     const [payload] = setAttributesMock.mock.calls[0]!;
@@ -101,10 +110,24 @@ describe("setEveAttributes", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     setAttributesMock.mockRejectedValue(new Error("world adapter unhappy"));
 
-    await setEveAttributes({ "$eve.parent": "wrun_parent" });
-    await setEveAttributes({ "$eve.parent": "wrun_parent" });
+    await emitAndFlush({ "$eve.parent": "wrun_parent" });
+    await emitAndFlush({ "$eve.parent": "wrun_parent" });
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]![0]).toMatch(/setEveAttributes failed/);
+  });
+
+  it("returns immediately while the attribute transport remains pending", async () => {
+    const write = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    setAttributesMock.mockImplementationOnce(() => {
+      started.resolve();
+      return write.promise;
+    });
+    expect(setEveAttributes({ "$eve.type": "turn" })).toBeUndefined();
+    expect(waitUntil).toHaveBeenCalledOnce();
+    await started.promise;
+    write.resolve();
+    await vi.mocked(waitUntil).mock.calls[0]![0];
   });
 });

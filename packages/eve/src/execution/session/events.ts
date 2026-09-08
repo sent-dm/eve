@@ -29,10 +29,13 @@ export const sessionEvents = {
   },
 
   read(
-    ref: EventStreamRef,
+    ref: EventStreamRef | Promise<EventStreamRef>,
     options?: { readonly startIndex?: number },
   ): ReadableStream<MessageStreamEvent> {
-    return sessionEvents.open(ref).read(options);
+    return parseNdjsonStream(async () => {
+      const storage = createStreamStorageScope().open((await ref).id);
+      return storage.read<Uint8Array>(options?.startIndex);
+    });
   },
 
   tailIndex(ref: EventStreamRef): Promise<number> {

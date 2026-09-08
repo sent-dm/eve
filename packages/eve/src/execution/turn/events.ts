@@ -20,6 +20,7 @@ import { resolveEffectiveAgentRuntime } from "#execution/effective-agent-config.
 import { observeSessionActivity } from "#execution/session-activity-projection.js";
 import { forwardTaskEventToSessionCallback } from "#execution/task-event-callback.js";
 import type { HarnessSession } from "#harness/types.js";
+import { getHarnessEmissionState } from "#harness/emission-state.js";
 import {
   encodeMessageStreamEvent,
   stampMessageStreamEvent,
@@ -42,8 +43,12 @@ export function bindTurnEvents(input: {
   const effectiveAgent = resolveEffectiveAgentRuntime(bundle, ctx);
   const dynamicConnections = bindDynamicConnections(ctx, bundle.resolvedAgent);
   const writer = input.events.getWriter();
+  let emissionState = getHarnessEmissionState(session.state);
 
   return {
+    get emissionState() {
+      return emissionState;
+    },
     release() {
       writer.releaseLock();
     },
@@ -61,6 +66,19 @@ export function bindTurnEvents(input: {
           ? ({ ...transformed, meta: event.meta } as MessageStreamEvent)
           : stampMessageStreamEvent(transformed);
       if (!forwarded) await writer.write(encodeMessageStreamEvent(emitted));
+      // Cancellation rolls back model state, but cannot roll back published identity.
+      if (emitted.type === "session.started") {
+        emissionState = { ...emissionState, sessionStarted: true };
+      } else if (emitted.type === "turn.started") {
+        emissionState = {
+          sessionStarted: true,
+          sequence: emitted.data.sequence,
+          stepIndex: 0,
+          turnId: emitted.data.turnId,
+        };
+      } else if (emitted.type === "step.started") {
+        emissionState = { ...emissionState, stepIndex: emitted.data.stepIndex };
+      }
 
       const lifecycleMessages = await dispatchMemoryLifecycleEvent({
         abortSignal: input.abortSignal,
