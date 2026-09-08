@@ -121,6 +121,7 @@ function blockContainsRequestAction(block: unknown, requestId: string): boolean 
   const candidate = block as { actions?: unknown; elements?: unknown };
   const requestActionPrefix = `eve_input:${requestId}`;
   const approvalActionPrefix = `eve_input:tool-approval:${requestId}`;
+  const routedApprovalMarker = `:tool-approval:${requestId}:`;
   return [candidate.actions, candidate.elements].some(
     (entries) =>
       Array.isArray(entries) &&
@@ -129,7 +130,9 @@ function blockContainsRequestAction(block: unknown, requestId: string): boolean 
         const actionId = (entry as { action_id?: unknown }).action_id;
         return (
           typeof actionId === "string" &&
-          (actionId.startsWith(requestActionPrefix) || actionId.startsWith(approvalActionPrefix))
+          (actionId.startsWith(requestActionPrefix) ||
+            actionId.startsWith(approvalActionPrefix) ||
+            (actionId.startsWith("eve_input:route:") && actionId.includes(routedApprovalMarker)))
         );
       }),
   );
@@ -234,8 +237,13 @@ export function defaultInputRequestedHandler(
         });
         continue;
       }
-      await postPrivateToolApproval({ channel, request, reviewer });
-      await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
+      const status = await channel.thread.post(`Waiting on approval from <@${reviewer}>…`);
+      await postPrivateToolApproval({
+        channel,
+        request,
+        reviewer,
+        statusMessageTs: status.id,
+      });
     }
   };
 }
@@ -257,6 +265,7 @@ async function postPrivateToolApproval(input: {
   readonly channel: Parameters<NonNullable<SlackChannelEvents["input.requested"]>>[1];
   readonly request: InputRequest;
   readonly reviewer: string;
+  readonly statusMessageTs: string;
 }): Promise<void> {
   const parts = renderInputRequestPostParts(input.request);
   const route = {
@@ -267,13 +276,34 @@ async function postPrivateToolApproval(input: {
   if (parts.details !== undefined) {
     await post({ blocks: routeHitlBlocks(parts.details.blocks, route), text: parts.details.text });
   }
-  const controlBlocks = routeHitlBlocks(parts.controls.blocks, route);
+  const threadUrl = slackThreadUrl({ ...route, messageTs: input.statusMessageTs });
+  const controlBlocks = [
+    ...routeHitlBlocks(parts.controls.blocks, route),
+    ...(threadUrl === undefined
+      ? []
+      : [
+          {
+            elements: [{ text: `<${threadUrl}|View thread>`, type: "mrkdwn" }],
+            type: "context",
+          },
+        ]),
+  ];
   const message = await post({ blocks: controlBlocks, text: parts.controls.text });
   recordApprovalCards(input.channel.state, [input.request], {
     messageBlocks: controlBlocks,
     messageChannelId: typeof message.raw.channel === "string" ? message.raw.channel : undefined,
     messageTs: message.id,
   });
+}
+
+function slackThreadUrl(route: {
+  readonly channelId: string;
+  readonly messageTs: string;
+  readonly threadTs: string;
+}): string | undefined {
+  if (!route.channelId || !route.messageTs || !route.threadTs) return undefined;
+  const messageTs = route.messageTs.replace(".", "");
+  return `https://slack.com/archives/${encodeURIComponent(route.channelId)}/p${messageTs}?thread_ts=${encodeURIComponent(route.threadTs)}&cid=${encodeURIComponent(route.channelId)}`;
 }
 
 function recordApprovalCards(

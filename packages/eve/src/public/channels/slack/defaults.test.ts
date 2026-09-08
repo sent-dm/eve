@@ -112,8 +112,8 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     expect(postEphemeral).not.toHaveBeenCalled();
   });
 
-  it("delivers a routed approval card in a reviewer DM", async () => {
-    const { channel, post, postDirectMessage } = buildChannelStub();
+  it("links a routed DM approval to its thread status and updates it after settlement", async () => {
+    const { channel, post, postDirectMessage, request } = buildChannelStub();
 
     await defaultInputRequestedHandler({
       reviewer: () => "U_REVIEWER",
@@ -129,7 +129,33 @@ describe("defaultInputRequestedHandler private tool approvals", () => {
     const rendered = JSON.stringify(postDirectMessage.mock.calls);
     expect(rendered).toContain("private draft");
     expect(rendered).toContain("eve_input:route:C123:111.222:tool-approval:approval-1");
+    expect(rendered).toContain(
+      "https://slack.com/archives/C123/pts1?thread_ts=111.222&cid=C123|View thread",
+    );
     expect(channel.state.pendingApprovalCards?.["approval-1"]?.messageChannelId).toBe("D123");
+
+    await defaultEvents["approval.settled"]!(
+      {
+        outcome: "approved",
+        requestId: "approval-1",
+        responderPrincipalId: "slack:T1:U_REVIEWER",
+        sequence: 1,
+        stepIndex: 0,
+        turnId: "turn-1",
+      },
+      channel,
+      sessionCtx,
+    );
+
+    expect(request).toHaveBeenCalledWith(
+      "chat.update",
+      expect.objectContaining({ channel: "D123", text: "Answered: Approve", ts: "dm1" }),
+    );
+    const update = request.mock.calls.find(([method]) => method === "chat.update")?.[1] as {
+      blocks?: unknown[];
+    };
+    expect(JSON.stringify(update.blocks)).not.toContain("eve_input:route:");
+    expect(JSON.stringify(update.blocks)).toContain("View thread");
   });
 });
 
