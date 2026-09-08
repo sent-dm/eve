@@ -52,6 +52,7 @@ import type { RunMode } from "#shared/run-mode.js";
 import type { ChannelAudience } from "#shared/channel-audience.js";
 import type { InstrumentationDecision } from "#shared/instrumentation-decision.js";
 import { compactMessages, shouldCompact } from "#harness/compaction.js";
+import { markFrameworkStepInput } from "#harness/messages.js";
 import {
   getHarnessEmissionState,
   isHarnessBetweenTurns,
@@ -940,7 +941,7 @@ describe("createToolLoopHarness", () => {
       });
 
       expect(result.session.history).toEqual([
-        { content: "channel context", role: "user" },
+        { content: "channel context", kind: "context.instruction", role: "user" },
         { content: "Hello!", role: "assistant" },
       ]);
     }
@@ -1172,17 +1173,20 @@ describe("createToolLoopHarness", () => {
       content: expect.stringContaining(
         '<agent id="ag_research:123456789012" name="research">waiting</agent>',
       ),
+      kind: "context.state",
       role: "user",
     });
     // The announcement precedes the turn's actual user message.
     expect(messages.at(-1)).toEqual({ content: "Hi", role: "user" });
     expect(messages.at(-2)).toEqual({
       content: expect.stringContaining("[Agents]"),
+      kind: "context.state",
       role: "user",
     });
     expect(JSON.stringify({ instructions, messages })).not.toContain("private-token");
     expect(result.session.history).toContainEqual({
       content: expect.stringContaining('<agent id="ag_research:123456789012"'),
+      kind: "context.state",
       role: "user",
     });
   });
@@ -1306,6 +1310,7 @@ describe("createToolLoopHarness", () => {
     // The request ends user-final: the announcement trails the tool results.
     expect(messages.at(-1)).toEqual({
       content: expect.stringContaining('<agent id="ag_research:123456789012"'),
+      kind: "context.state",
       role: "user",
     });
     expect(messages.filter((message) => message.role === "assistant")).toHaveLength(1);
@@ -1315,6 +1320,7 @@ describe("createToolLoopHarness", () => {
     // sees it and does not re-announce an unchanged listing.
     expect(result.session.history.at(-2)).toEqual({
       content: expect.stringContaining("[Agents]"),
+      kind: "context.state",
       role: "user",
     });
   });
@@ -5353,6 +5359,7 @@ describe("createToolLoopHarness", () => {
         }>;
         expect(reissueMessages.at(-1)).toMatchObject({
           content: expect.stringContaining("was not delivered"),
+          kind: "execution.retry",
           role: "user",
         });
         expect(reissueMessages.at(-1)?.content).not.toContain(EMPTY_DELIVERY_SENTINEL);
@@ -5416,6 +5423,7 @@ describe("createToolLoopHarness", () => {
         }>;
         expect(reissueMessages.at(-1)).toMatchObject({
           content: expect.stringContaining("was not delivered"),
+          kind: "execution.retry",
           role: "user",
         });
         expect(reissueMessages.at(-1)?.content).not.toContain(EMPTY_DELIVERY_SENTINEL);
@@ -8709,8 +8717,8 @@ describe("createToolLoopHarness", () => {
     expect(secondResult.next).toBeNull();
     expect(secondMessages.slice(0, firstMessages.length)).toEqual(firstMessages);
     expect(secondMessages.slice(-2)).toEqual([
-      { content: ephemeralContext, role: "user" },
-      { content: context, role: "user" },
+      { content: ephemeralContext, kind: "context.instruction", role: "user" },
+      { content: context, kind: "context.instruction", role: "user" },
     ]);
     expect((await readPreparedMessages(1)).at(-1)).toMatchObject({
       content: context,
@@ -9995,7 +10003,7 @@ describe("createToolLoopHarness", () => {
     ]);
   });
 
-  it("compaction appends synthetic user message when recent window trails with assistant", async () => {
+  it("compaction appends a framework continuation when recent window trails with assistant", async () => {
     // Step 1: tool call → harness continues (next === runStep).
     setupMockAgent({
       content: [{ type: "tool-call", toolCallId: "call-1", toolName: "add", args: {} }],
@@ -10042,7 +10050,7 @@ describe("createToolLoopHarness", () => {
 
     // Step 3: new turn with compaction. The mock simulates the
     // guarded output from the real compactMessages: trailing
-    // assistant gets a synthetic user("Continue.") appended.
+    // assistant gets a framework continuation appended.
     vi.mocked(shouldCompact).mockReturnValue(true);
     vi.mocked(compactMessages).mockResolvedValue([
       { content: "Summary of our conversation so far:", role: "user" },
@@ -10062,8 +10070,8 @@ describe("createToolLoopHarness", () => {
     const step3Harness = createToolLoopHarness(createTestConfig("conversation"));
     await step3Harness(result2.session, {});
 
-    // Verify the model received messages ending with the synthetic
-    // user message, not the trailing assistant.
+    // Verify the model received the continuation user message, not the
+    // trailing assistant.
     const instance = vi.mocked(ToolLoopAgent).mock.results.at(-1)?.value as {
       generate: ReturnType<typeof vi.fn>;
     };
@@ -12150,7 +12158,7 @@ describe("createToolLoopHarness", () => {
       });
 
       expect(result.session.history).toEqual([
-        { role: "user", content: "background-context" },
+        { role: "user", content: "background-context", kind: "context.instruction" },
         { role: "user", content: "Hi" },
         { role: "assistant", content: "ok" },
       ]);
@@ -12172,7 +12180,9 @@ describe("createToolLoopHarness", () => {
             typeof message.content === "string" && message.content.startsWith("Client context:"),
         );
 
-        expect(visibleClientContext).toEqual([{ content: clientContext, role: "user" }]);
+        expect(visibleClientContext).toEqual([
+          { content: clientContext, kind: "context.instruction", role: "user" },
+        ]);
         expect(result.session.history).not.toContainEqual({
           content: clientContext,
           role: "user",
@@ -12237,7 +12247,7 @@ describe("createToolLoopHarness", () => {
 
       expect(secondPrompt.slice(0, firstPrompt.length)).toEqual(firstPrompt);
       expect(secondPrompt).toEqual([
-        { content: clientContext, role: "user" },
+        { content: clientContext, kind: "context.instruction", role: "user" },
         { content: "Add 20 and 22.", role: "user" },
         toolCallMessage,
         toolResultMessage,
@@ -12348,7 +12358,7 @@ describe("createToolLoopHarness", () => {
       expect(vi.mocked(shouldCompact)).toHaveBeenCalledWith(
         [
           { content: "earlier", role: "user" },
-          { content: "Client context:\ncurrent", role: "user" },
+          { content: "Client context:\ncurrent", kind: "context.instruction", role: "user" },
           { content: "Hi", role: "user" },
         ],
         session.compaction,
@@ -12460,8 +12470,12 @@ describe("createToolLoopHarness", () => {
       const { instructions, messages } = getLastAgentSettings();
       expect(instructions).toBe("You are a test assistant.");
       expect(messages.slice(-3)).toEqual([
-        { role: "user", content: taskState },
-        { role: "user", content: TASK_DELIVERY_INITIATING_INSTRUCTION },
+        { role: "user", content: taskState, kind: "execution.background_task" },
+        {
+          role: "user",
+          content: TASK_DELIVERY_INITIATING_INSTRUCTION,
+          kind: "execution.background_task",
+        },
         { role: "user", content: "Start the background work." },
       ]);
     });
@@ -12517,14 +12531,24 @@ describe("createToolLoopHarness", () => {
         });
 
         await contextStorage.run(ctx, () =>
-          runStep(session, { message: "Background task task_1 is completed." }),
+          runStep(
+            session,
+            markFrameworkStepInput(
+              { message: "Background task task_1 is completed." },
+              "execution.background_task",
+            ),
+          ),
         );
 
         const { instructions, messages } = getLastAgentSettings();
         expect(instructions).toBe("You are a test assistant.");
         expect(messages.slice(-2)).toEqual([
-          { role: "user", content: instruction },
-          { role: "user", content: "Background task task_1 is completed." },
+          { role: "user", content: instruction, kind: "execution.background_task" },
+          {
+            role: "user",
+            content: "Background task task_1 is completed.",
+            kind: "execution.background_task",
+          },
         ]);
       },
     );
@@ -12614,15 +12638,15 @@ describe("createToolLoopHarness", () => {
       expect(getLastAgentSettings().instructions).toBe("You are a test assistant.");
       expect(getLastAgentSettings().messages).toEqual([
         { content: "Static context.", role: "user" },
-        { content: "Session context.", role: "user" },
-        { content: "Turn context.", role: "user" },
+        { content: "Session context.", kind: "context.instruction", role: "user" },
+        { content: "Turn context.", kind: "context.instruction", role: "user" },
         { content: "Hello.", role: "user" },
       ]);
       expect(result.session.history).toEqual([
         { content: "Static context.", role: "user" },
         hidden,
-        { content: "Session context.", role: "user" },
-        { content: "Turn context.", role: "user" },
+        { content: "Session context.", kind: "context.instruction", role: "user" },
+        { content: "Turn context.", kind: "context.instruction", role: "user" },
         { content: "Hello.", role: "user" },
         { content: "ok", role: "assistant" },
       ]);

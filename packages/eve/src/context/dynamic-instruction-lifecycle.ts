@@ -17,6 +17,7 @@ import {
   TurnDynamicInstructionsKey,
 } from "#context/keys.js";
 import { buildResolveContext } from "#context/dynamic-resolve-context.js";
+import { createFrameworkUserMessage } from "#harness/messages.js";
 
 const log = createLogger("dynamic-instructions");
 
@@ -36,7 +37,7 @@ function lowerInstruction(definition: InstructionsDefinition): LoweredInstructio
   if (content.length === 0) return undefined;
   return normalized.role === "system"
     ? { role: "system", message: { role: "system", content } }
-    : { role: "user", message: { role: "user", content } };
+    : { role: "user", message: createFrameworkUserMessage("context.instruction", content) };
 }
 
 function durableKeyForEvent(eventType: string): ContextKey<SlugMessageMap> | undefined {

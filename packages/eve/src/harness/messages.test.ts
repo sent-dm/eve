@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   coalesceDeliveries,
   coalesceTurnInputs,
+  createFrameworkUserMessage,
+  isFrameworkMessageKind,
+  isFrameworkUserMessage,
+  markFrameworkStepInput,
   normalizeModelMessages,
   normalizeUserContent,
   resolveAssistantStepText,
@@ -95,6 +99,29 @@ describe("coalesceTurnInputs", () => {
     const result = messages.reduce(coalesceTurnInputs);
 
     expect(result).toEqual({ message: "a\n\nb\n\nc" });
+  });
+
+  it("preserves a framework kind only when all merged message content shares it", () => {
+    expect(
+      coalesceTurnInputs(
+        markFrameworkStepInput({ message: "first" }, "execution.background_task"),
+        markFrameworkStepInput({ message: "second" }, "execution.background_task"),
+      ),
+    ).toEqual(markFrameworkStepInput({ message: "first\n\nsecond" }, "execution.background_task"));
+    expect(
+      coalesceTurnInputs(
+        markFrameworkStepInput({ message: "first" }, "execution.background_task"),
+        {
+          message: "second",
+        },
+      ),
+    ).toEqual({ message: "first\n\nsecond" });
+    expect(
+      coalesceTurnInputs(
+        markFrameworkStepInput({ message: "first" }, "context.instruction"),
+        markFrameworkStepInput({ message: "second" }, "execution.background_task"),
+      ),
+    ).toEqual({ message: "first\n\nsecond" });
   });
 
   it("merges inputResponses from both payloads", () => {
@@ -254,6 +281,36 @@ describe("normalizeModelMessages", () => {
         visible,
       ]),
     ).toEqual([{ content: [toolCall], role: "assistant" }, visible]);
+  });
+});
+
+describe("createFrameworkUserMessage", () => {
+  it.each([
+    "context.instruction",
+    "context.state",
+    "context.compaction",
+    "memory.load",
+    "execution.background_task",
+    "execution.continuation",
+    "execution.retry",
+  ] as const)("recognizes %s as a framework message kind", (kind) => {
+    expect(isFrameworkMessageKind(kind)).toBe(true);
+  });
+
+  it("brands framework-authored user-role messages", () => {
+    const message = createFrameworkUserMessage(
+      "execution.background_task",
+      "Background task task_1 completed.",
+    );
+
+    expect(message).toEqual({
+      content: "Background task task_1 completed.",
+      kind: "execution.background_task",
+      role: "user",
+    });
+    expect(isFrameworkUserMessage(message)).toBe(true);
+    expect(isFrameworkUserMessage({ content: "A user message", role: "user" })).toBe(false);
+    expect(isFrameworkMessageKind("synthetic")).toBe(false);
   });
 });
 

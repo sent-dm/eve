@@ -164,6 +164,8 @@ import {
   dropStaleSessionLimitContinuationResponses,
 } from "#harness/stale-input-responses.js";
 import {
+  createFrameworkUserMessage,
+  frameworkMessageKindForStepInput,
   normalizeModelMessages,
   normalizeUserContent,
   resolveAssistantStepText,
@@ -974,20 +976,27 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       pending.deferredContext === true ? undefined : readClientContext(effectiveStepInput);
     const activeClientContext = clientContext ?? storedClientContext?.messages;
     const ephemeralContextMessages: ModelMessage[] =
-      activeClientContext?.map((content) => ({ content, role: "user" })) ?? [];
+      activeClientContext?.map((content) =>
+        createFrameworkUserMessage("context.instruction", content),
+      ) ?? [];
     const preparedTurnInput: ModelMessage[] = [];
     if (effectiveStepInput?.context !== undefined && pending.deferredContext !== true) {
       for (const entry of effectiveStepInput.context) {
-        preparedTurnInput.push({ content: entry, role: "user" });
+        preparedTurnInput.push(createFrameworkUserMessage("context.instruction", entry));
       }
     }
+    const frameworkMessageKind = frameworkMessageKindForStepInput(effectiveStepInput);
     const normalizedTurnContent = normalizeUserContent(effectiveStepInput?.message);
     const stagedTurnContent =
       normalizedTurnContent !== undefined && !pending.deferredMessage && !pending.consumedMessage
         ? await stageAttachmentsToSandbox(normalizedTurnContent)
         : undefined;
     if (stagedTurnContent !== undefined) {
-      preparedTurnInput.push({ content: stagedTurnContent, role: "user" });
+      preparedTurnInput.push(
+        frameworkMessageKind === undefined
+          ? { content: stagedTurnContent, role: "user" }
+          : createFrameworkUserMessage(frameworkMessageKind, stagedTurnContent),
+      );
     }
 
     let instructionMessages: ModelMessage[] = [];
@@ -1091,7 +1100,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         store: agentStore,
       });
       if (announcement !== undefined) {
-        messages.push({ content: announcement, role: "user" });
+        messages.push(createFrameworkUserMessage("context.state", announcement));
       }
     }
 
@@ -1125,7 +1134,9 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       );
       return [
         ...durableMessages.slice(0, insertionIndex),
-        ...turnClientContext.messages.map((content) => ({ content, role: "user" as const })),
+        ...turnClientContext.messages.map((content) =>
+          createFrameworkUserMessage("context.instruction", content),
+        ),
         ...durableMessages.slice(insertionIndex),
       ];
     };
@@ -1255,21 +1266,27 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       currentMessages.addSystem(buildDynamicInstructionMessages(ctx));
       const skillAnnouncement = ctx.get(PendingSkillAnnouncementKey);
       if (skillAnnouncement !== undefined && skillAnnouncement.length > 0) {
-        currentMessages.add(emissionState.sequence, skillAnnouncement);
+        currentMessages.add(emissionState.sequence, skillAnnouncement, "context.state");
       }
       const taskState = ctx.get(TurnTaskStateKey);
       if (taskState !== undefined) {
-        currentMessages.add(emissionState.sequence, taskState);
+        currentMessages.add(emissionState.sequence, taskState, "execution.background_task");
       }
     }
     if (deliveryPolicy.instruction !== undefined) {
-      currentMessages.add(emissionState.sequence, deliveryPolicy.instruction);
+      currentMessages.add(
+        emissionState.sequence,
+        deliveryPolicy.instruction,
+        "execution.background_task",
+      );
     }
     const pendingApprovals = renderPendingApprovalsInstruction(
       getPendingInputBatches(session.state).flatMap((batch) => batch.requests),
     );
     if (pendingApprovals !== undefined) {
-      currentMessages.add(emissionState.sequence, pendingApprovals, { cacheFriendly: false });
+      currentMessages.add(emissionState.sequence, pendingApprovals, "context.state", {
+        cacheFriendly: false,
+      });
     }
 
     // Hydrate `eve-sandbox:` ref FileParts into inline bytes for the model call
@@ -1346,7 +1363,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       // from the step's prompt messages, so the note exists only on this
       // call's wire request.
       const callMessages = opts.trailingUserNote
-        ? [...modelMessages, { role: "user" as const, content: opts.trailingUserNote }]
+        ? [...modelMessages, createFrameworkUserMessage("execution.retry", opts.trailingUserNote)]
         : [...modelMessages];
       const harnessTools = buildHarnessToolsWithDynamicSubagents(config.tools, ctx);
       const backgroundBatch = createBackgroundToolCallBatch();
@@ -2489,7 +2506,7 @@ async function handleStepResult(input: {
   });
   const inputRequests: InputRequest[] = [...approvalRequests, ...questionRequests];
   const pendingApprovals = renderPendingApprovalsSnippet(approvalRequests);
-  // Keep outcomes from resumed work ahead of the synthetic pending-approval
+  // Keep outcomes from resumed work ahead of the framework pending-approval
   // message; only the unresolved assistant response belongs to the parked batch.
   const pendingResponseStart = responseMessages.findIndex((message) => message.role !== "tool");
   const committedResponseMessages =
@@ -2502,7 +2519,7 @@ async function handleStepResult(input: {
     ...committedResponseMessages,
     ...(pendingApprovals === undefined
       ? []
-      : [{ content: pendingApprovals, role: "user" as const }]),
+      : [createFrameworkUserMessage("context.state", pendingApprovals)]),
   ];
   const advertisedCoordinationTools = getAdvertisedTools({
     session: baseSession,

@@ -1,5 +1,7 @@
 import type { ModelMessage, SystemModelMessage } from "ai";
 
+import { createFrameworkUserMessage, type FrameworkMessageKind } from "#harness/messages.js";
+
 interface AddCurrentMessageOptions {
   readonly cacheFriendly?: boolean;
 }
@@ -15,7 +17,12 @@ export function createCurrentMessages(
 ): {
   readonly nonSystemMessages: readonly ModelMessage[];
   readonly systemMessages: readonly SystemModelMessage[];
-  add(turnSequence: number, message: string, options?: AddCurrentMessageOptions): void;
+  add(
+    turnSequence: number,
+    message: string,
+    kind: FrameworkMessageKind,
+    options?: AddCurrentMessageOptions,
+  ): void;
   addSystem(messages: SystemModelMessage | readonly SystemModelMessage[]): void;
 } {
   const systemMessages: SystemModelMessage[] = [];
@@ -41,9 +48,9 @@ export function createCurrentMessages(
     currentTurnInsertionIndex !== undefined || !hasTailApprovalResponse(nonSystemMessages);
 
   return {
-    add(turnSequence, message, { cacheFriendly = true } = {}) {
+    add(turnSequence, message, kind, { cacheFriendly = true } = {}) {
       if (turnSequence > 0 && cacheFriendly === true && canAppendUserMessages) {
-        nonSystemMessages.splice(userInsertionIndex, 0, { role: "user", content: message });
+        nonSystemMessages.splice(userInsertionIndex, 0, createFrameworkUserMessage(kind, message));
         userInsertionIndex += 1;
       } else {
         systemMessages.push({ role: "system", content: message });

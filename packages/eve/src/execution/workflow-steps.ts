@@ -51,7 +51,7 @@ import { setChannelContext } from "#execution/channel-context.js";
 import { observeSessionActivity } from "#execution/session-activity-projection.js";
 import { hasPendingInputBatch } from "#harness/input-requests.js";
 import { activeTurnId } from "#harness/active-turn-id.js";
-import { coalesceTurnInputs } from "#harness/messages.js";
+import { coalesceTurnInputs, markFrameworkStepInput } from "#harness/messages.js";
 import { getWorkflowTaskCallIds, isWorkflowTaskInterrupt } from "#harness/workflow-task-state.js";
 import { getPendingWorkflowInterrupt } from "#harness/workflow-interrupt-state.js";
 import type { HandleEventFn, HarnessSession, StepInput, StepResult } from "#harness/types.js";
@@ -281,6 +281,9 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
         ...resolved,
         context: [...(resolved.context ?? []), taskContext.context],
       };
+    }
+    if (resolved.message !== undefined) {
+      resolved = markFrameworkStepInput(resolved, "execution.background_task");
     }
   }
 

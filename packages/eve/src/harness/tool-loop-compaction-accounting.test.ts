@@ -182,9 +182,9 @@ describe("tool-loop structured compaction accounting", () => {
     );
 
     expect(vi.mocked(generateText)).toHaveBeenCalledOnce();
-    expect(vi.mocked(generateText).mock.calls[0]?.[0].prompt).not.toContain(
-      "PRIVATE_MEMORY_SENTINEL",
-    );
+    const prompt = vi.mocked(generateText).mock.calls[0]?.[0].messages?.[0]?.content;
+    if (typeof prompt !== "string") throw new Error("Expected the compaction prompt text.");
+    expect(prompt).not.toContain("PRIVATE_MEMORY_SENTINEL");
     expect(JSON.stringify(result.session.history)).toContain("PRIVATE_MEMORY_SENTINEL");
     expect(JSON.stringify(result.session.history)).toContain("eve.memory");
   });
@@ -290,6 +290,7 @@ describe("tool-loop structured compaction accounting", () => {
     expect(vi.mocked(generateText)).toHaveBeenCalledTimes(1);
     expect(second.session.history[0]).toEqual({
       content: "Summary of our conversation so far:",
+      kind: "context.compaction",
       role: "user",
     });
     expect(second.session.history[1]).toEqual({
@@ -355,6 +356,7 @@ describe("tool-loop structured compaction accounting", () => {
     expect(vi.mocked(generateText)).toHaveBeenCalledTimes(1);
     expect(result.session.history[0]).toEqual({
       content: "Summary of our conversation so far:",
+      kind: "context.compaction",
       role: "user",
     });
     expect(result.session.history[1]).toEqual({

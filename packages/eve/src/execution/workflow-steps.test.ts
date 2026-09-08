@@ -2185,6 +2185,7 @@ describe("turnStep", () => {
   });
 
   it("sets task-delivery provenance only when the runtime supplies owned task state", async () => {
+    const observedInputs: unknown[] = [];
     const observedTaskDeliveries: unknown[] = [];
     const observedTaskStates: unknown[] = [];
     const metadata = { kind: "report-probe", name: "report_probe" } as const;
@@ -2212,7 +2213,8 @@ describe("turnStep", () => {
     });
     installSessionStoreMocks([session, session, session]);
     vi.mocked(createExecutionNodeStep).mockImplementation(() => {
-      return async (stepSession): Promise<StepResult> => {
+      return async (stepSession, stepInput): Promise<StepResult> => {
+        observedInputs.push(stepInput);
         observedTaskDeliveries.push(contextStorage.getStore()?.get(TurnTaskDeliveryKey));
         observedTaskStates.push(contextStorage.getStore()?.get(TurnTaskStateKey));
         return { next: { done: true, output: "ok" }, session: stepSession };
@@ -2251,6 +2253,13 @@ describe("turnStep", () => {
 
     expect(observedTaskDeliveries).toEqual(["settled", "none", "none"]);
     expect(observedTaskStates).toEqual([undefined, undefined, undefined]);
+    expect(observedInputs[0]).toMatchObject({
+      frameworkMessageKind: "execution.background_task",
+    });
+    expect(observedInputs[1]).toMatchObject({
+      frameworkMessageKind: "execution.background_task",
+    });
+    expect(observedInputs[2]).not.toHaveProperty("frameworkMessageKind");
   });
 
   it("supplies initiating task state after the active turn accepts delegated work", async () => {

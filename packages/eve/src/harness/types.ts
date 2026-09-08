@@ -159,8 +159,8 @@ export interface StepInput {
   /** Internal actor attribution for `message`. */
   readonly messageAuth?: SessionAuthContext | null;
   /**
-   * Context strings from the channel delivery. Each entry is appended
-   * as a `role: "user"` message to `session.history` before the
+   * Context strings from the channel delivery. Each entry is appended as a
+   * synthetic user-role message to `session.history` before the
    * delivery message. Populated by channels via `SendPayload.context`.
    */
   readonly context?: readonly string[];

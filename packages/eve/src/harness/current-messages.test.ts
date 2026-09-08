@@ -30,11 +30,13 @@ describe("createCurrentMessages", () => {
   it("keeps first-turn context in instructions and routes later context as user messages", () => {
     const current = createCurrentMessages([]);
 
-    current.add(0, "first");
-    current.add(1, "later");
+    current.add(0, "first", "context.instruction");
+    current.add(1, "later", "context.instruction");
 
     expect(current.systemMessages).toEqual([{ role: "system", content: "first" }]);
-    expect(current.nonSystemMessages).toEqual([{ role: "user", content: "later" }]);
+    expect(current.nonSystemMessages).toEqual([
+      { role: "user", content: "later", kind: "context.instruction" },
+    ]);
   });
 
   it("inserts later context before the current turn input", () => {
@@ -47,13 +49,13 @@ describe("createCurrentMessages", () => {
       { currentTurnMessages },
     );
 
-    current.add(1, "task state");
-    current.add(1, "delivery guidance");
+    current.add(1, "task state", "execution.background_task");
+    current.add(1, "delivery guidance", "execution.background_task");
 
     expect(current.nonSystemMessages).toEqual([
       { role: "user", content: "history" },
-      { role: "user", content: "task state" },
-      { role: "user", content: "delivery guidance" },
+      { role: "user", content: "task state", kind: "execution.background_task" },
+      { role: "user", content: "delivery guidance", kind: "execution.background_task" },
       { role: "user", content: "channel context" },
       { role: "user", content: "current request" },
     ]);
@@ -82,7 +84,7 @@ describe("createCurrentMessages", () => {
       approvalTail,
     ]);
 
-    current.add(1, "task state");
+    current.add(1, "task state", "execution.background_task");
 
     expect(current.systemMessages).toEqual([{ role: "system", content: "task state" }]);
     expect(current.nonSystemMessages.at(-1)).toBe(approvalTail);
@@ -91,7 +93,7 @@ describe("createCurrentMessages", () => {
   it("keeps hierarchy-sensitive context in instructions when requested", () => {
     const current = createCurrentMessages([]);
 
-    current.add(1, "authoritative", { cacheFriendly: false });
+    current.add(1, "authoritative", "context.instruction", { cacheFriendly: false });
 
     expect(current.systemMessages).toEqual([{ role: "system", content: "authoritative" }]);
     expect(current.nonSystemMessages).toEqual([]);

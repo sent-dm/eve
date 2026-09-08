@@ -1,5 +1,7 @@
 import type { ModelMessage } from "ai";
 
+import { createFrameworkUserMessage } from "#harness/messages.js";
+
 import { composeRuntimeBasePrompt } from "#runtime/prompt/compose.js";
 import type { PreparedRuntimeTool } from "#runtime/sessions/turn.js";
 import type { ResolvedAgent, ResolvedAgentDefinition } from "#runtime/types.js";
@@ -107,7 +109,7 @@ export function createResolvedRuntimeTurnAgent(input: {
     id,
     initialMessages: agent.instructions
       .filter((entry) => entry.role === "user" && entry.content.trim().length > 0)
-      .map((entry) => ({ content: entry.content.trim(), role: "user" as const })),
+      .map((entry) => createFrameworkUserMessage("context.instruction", entry.content.trim())),
     instructions: composeRuntimeBasePrompt({
       connections: agent.connections,
       instructions: agent.instructions,
