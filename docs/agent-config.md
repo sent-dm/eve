@@ -312,7 +312,10 @@ Dynamic tools, including discovered connection tools, use the same eligibility
 rules. `connection_search` stays direct so its discoveries reach the next model
 step's catalog; eligible discovered tools become callable through `code_mode`. When names overlap, step-scoped definitions override turn-scoped,
 session-scoped, and static definitions, in that order. Each program keeps the
-tool catalog and captured values from the model step that dispatched it.
+tool catalog and captured values from the model step that dispatched it. Nested
+calls run against a snapshot of the session taken at dispatch: they see the
+conversation history as of that step, and session state a tool writes during
+the program is not carried back into the parent session.
 
 If a nested tool requires authorization, eve displays its authorization
 request and waits for the matching callback before retrying that call. Earlier
@@ -327,14 +330,14 @@ Invalid JavaScript, uncaught program or nested-tool errors, and source, bridge,
 or Code Mode serialization limit failures return to the model without retrying
 the unchanged program. Sandbox infrastructure failures retain workflow step retries.
 
-| Field          | Type                                                                               | Default          | Description                                                                                                                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reasoning`    | `AgentReasoningDefinition`                                                         | provider default | Provider-agnostic reasoning effort forwarded to the agent's turn model calls.                                                                                                                            |
-| `modelOptions` | `AgentModelOptionsDefinition`                                                      | none             | Provider option overrides forwarded to the model call.                                                                                                                                                   |
-| `limits`       | `AgentLimitsDefinition`                                                            | field-specific   | Framework-owned runtime limits. Sessions complete after 30 days by default; usage-limit defaults and inheritance are described above. Set a limit to `false` to disable it.                              |
-| `experimental` | `{ codeMode?: false \| { maxSubagents?: number }; workflow?: { world?: string } }` | unset            | Opt-in settings that can change or disappear in any release. `codeMode` adds programmatic tool orchestration with on-demand discovery for dynamic tools; `workflow.world` selects the Workflow world package on the root agent.        |
-| `outputSchema` | Standard Schema or a JSON Schema object                                            | none             | Structured return type for function-like invocations such as a subagent turn, schedule, or remote job. Ordinary interactive turns ignore it unless the client supplies a per-message schema.             |
-| `build`        | `{ externalDependencies?: string[] }`                                              | none             | Hosted-build packaging controls. `externalDependencies` keeps listed packages external while eve compiles authored modules such as tools and channels, and traces those packages into the hosted output. |
+| Field          | Type                                                                               | Default          | Description                                                                                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reasoning`    | `AgentReasoningDefinition`                                                         | provider default | Provider-agnostic reasoning effort forwarded to the agent's turn model calls.                                                                                                                                                   |
+| `modelOptions` | `AgentModelOptionsDefinition`                                                      | none             | Provider option overrides forwarded to the model call.                                                                                                                                                                          |
+| `limits`       | `AgentLimitsDefinition`                                                            | field-specific   | Framework-owned runtime limits. Sessions complete after 30 days by default; usage-limit defaults and inheritance are described above. Set a limit to `false` to disable it.                                                     |
+| `experimental` | `{ codeMode?: false \| { maxSubagents?: number }; workflow?: { world?: string } }` | unset            | Opt-in settings that can change or disappear in any release. `codeMode` adds programmatic tool orchestration with on-demand discovery for dynamic tools; `workflow.world` selects the Workflow world package on the root agent. |
+| `outputSchema` | Standard Schema or a JSON Schema object                                            | none             | Structured return type for function-like invocations such as a subagent turn, schedule, or remote job. Ordinary interactive turns ignore it unless the client supplies a per-message schema.                                    |
+| `build`        | `{ externalDependencies?: string[] }`                                              | none             | Hosted-build packaging controls. `externalDependencies` keeps listed packages external while eve compiles authored modules such as tools and channels, and traces those packages into the hosted output.                        |
 
 `externalDependencies` is a packaging control only. It keeps selected packages as runtime dependencies in the hosted output; it does not authorize, configure, or review any third-party service those packages may call.
 
