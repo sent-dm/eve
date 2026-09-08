@@ -62,18 +62,16 @@ const AGENT_INVOCATION_IDS = Symbol.for("eve.workflow-tool-run.agent-invocation-
 export async function agent(ctx: ToolContext, input: AgentInput): Promise<JsonValue> {
   validateAgentInput(input, true);
   readWorkflowToolRunRef(ctx);
-  const invocation: {
-    agentId?: string;
-    message: string;
-    outputSchema?: JsonObject;
-    target: string;
-  } = {
-    message: input.message,
-    target: input.target,
-  };
-  if (input.agentId !== undefined) invocation.agentId = input.agentId;
-  if (input.outputSchema !== undefined) invocation.outputSchema = input.outputSchema;
-  return await invokeAgent(ctx, invocation, { invocationId: `${ctx.callId}:${input.key}` });
+  return await invokeAgent(
+    ctx,
+    {
+      agentId: input.agentId,
+      message: input.message,
+      outputSchema: input.outputSchema,
+      target: input.target,
+    },
+    { invocationId: `${ctx.callId}:${input.key}` },
+  );
 }
 
 /** Invokes an agent with a framework-selected replay-stable invocation id. */
