@@ -1,6 +1,12 @@
 import { readdir, readFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  collectAuthoredTurnTimings,
+  collectVercelTurnProfile,
+  renderNativeTurnProfile,
+  summarizeDurations,
+} from "./workflow-turn-profile.mjs";
 
 const PERFORMANCE_LOG_PREFIX = "EVE_WORKFLOW_STRESS_METRIC=";
 const REQUIRED_SCENARIOS = ["concurrent", "sequential"];
@@ -151,35 +157,18 @@ export function renderWorkflowStressMarkdown(report) {
     );
   }
 
+  if (report.nativeProfile !== undefined)
+    lines.push("", renderNativeTurnProfile(report.nativeProfile));
+
   return `${lines.join("\n")}\n`;
 }
 
 function summarizeSamples(samples) {
-  const values = samples.map((sample) => sample.durationMs).sort((left, right) => left - right);
-
-  if (values.length === 0) {
+  const summary = summarizeDurations(samples.map((sample) => sample.durationMs));
+  if (summary === undefined) {
     throw new Error("Cannot summarize an empty Workflow stress sample set");
   }
-
-  return {
-    count: values.length,
-    maxMs: values.at(-1),
-    meanMs: values.reduce((total, value) => total + value, 0) / values.length,
-    minMs: values[0],
-    p50Ms: percentile(values, 0.5),
-    p90Ms: percentile(values, 0.9),
-    p95Ms: percentile(values, 0.95),
-  };
-}
-
-function percentile(sortedValues, probability) {
-  const position = (sortedValues.length - 1) * probability;
-  const lowerIndex = Math.floor(position);
-  const upperIndex = Math.ceil(position);
-  const lowerValue = sortedValues[lowerIndex];
-  const upperValue = sortedValues[upperIndex];
-
-  return lowerValue + (upperValue - lowerValue) * (position - lowerIndex);
+  return summary;
 }
 
 function calculateLinearSlope(points) {
@@ -281,9 +270,14 @@ function parseArguments(argv) {
     const name = argv[index];
     const value = argv[index + 1];
 
+    if (name === "--native-vercel") {
+      options.nativeVercel = true;
+      continue;
+    }
+
     if (!["--artifacts", "--json", "--markdown"].includes(name) || value === undefined) {
       throw new Error(
-        "Usage: workflow-stress-report.mjs --artifacts <dir> [--json <path>] [--markdown <path>]",
+        "Usage: workflow-stress-report.mjs --artifacts <dir> [--json <path>] [--markdown <path>] [--native-vercel]",
       );
     }
 
@@ -312,6 +306,31 @@ async function main() {
     runId: process.env.GITHUB_RUN_ID,
     sha: process.env.GITHUB_SHA,
   });
+  if (options.nativeVercel) {
+    const eventPath = metrics.sequential.artifactPath.replace(/\.json$/, ".events.ndjson");
+    const events = (await readFile(eventPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const clientDurations = new Map(
+      metrics.sequential.metric.samples.map((sample) => [sample.turnNumber, sample.durationMs]),
+    );
+    const turns = collectAuthoredTurnTimings(events).map((turn) => ({
+      ...turn,
+      clientDurationMs: clientDurations.get(turn.turnNumber),
+    }));
+    if (
+      turns.length !== clientDurations.size ||
+      turns.some((turn) => turn.clientDurationMs === undefined)
+    ) {
+      throw new Error("Native turn owners do not match the sequential stress samples");
+    }
+    report.nativeProfile = await collectVercelTurnProfile(turns, {
+      token: process.env.VERCEL_TOKEN,
+      teamId: process.env.VERCEL_ORG_ID,
+      projectId: process.env.VERCEL_PROJECT_ID,
+    });
+  }
   const markdown = renderWorkflowStressMarkdown(report);
 
   if (options.json !== undefined) {

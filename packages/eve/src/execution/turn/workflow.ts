@@ -74,6 +74,12 @@ async function executeClaimedTurn(
       ? (input.submission.command.caller?.taskId ?? input.submission.initial?.taskId)
       : input.submission.initial?.taskId;
   let ownerFailure: { error: unknown } | undefined;
+  let active = true;
+  const failOwner = (error: unknown): void => {
+    if (!active) return;
+    ownerFailure = { error };
+    controller.abort(error);
+  };
   const observeEnvelope = (envelope: InboxEnvelope): void => {
     const submission = submissionFromEnvelope(envelope);
     if (submission !== undefined) eventIds.add(submission.eventId);
@@ -81,10 +87,7 @@ async function executeClaimedTurn(
       controller.abort(new TurnCancelledError());
     }
   };
-  const stopObserving = inbox.observe(observeEnvelope, (error) => {
-    ownerFailure = { error };
-    controller.abort(error);
-  });
+  const stopObserving = inbox.observe(observeEnvelope, failOwner);
   let pending: InboxEnvelope[] = [];
   let nextRead: Promise<void> | undefined;
   const readNext = (): Promise<void> =>
@@ -94,8 +97,7 @@ async function executeClaimedTurn(
         nextRead = undefined;
       },
       (error) => {
-        ownerFailure = { error };
-        controller.abort(error);
+        failOwner(error);
         nextRead = undefined;
       },
     ));
@@ -119,8 +121,7 @@ async function executeClaimedTurn(
           (error) => {
             executors.delete(runId);
             completedExecutors.add(runId);
-            ownerFailure = { error };
-            controller.abort(error);
+            failOwner(error);
           },
         ),
       );
@@ -223,8 +224,11 @@ async function executeClaimedTurn(
     if (result.kind === "receipt" && !result.receipt.terminal)
       await claimAlias(result.receipt.continuationToken);
     return result;
+  } catch (error) {
+    controller.abort(error);
+    throw error;
   } finally {
+    active = false;
     stopObserving();
-    controller.abort(new TurnCancelledError());
   }
 }

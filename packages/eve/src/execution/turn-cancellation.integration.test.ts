@@ -173,6 +173,39 @@ async function expectNoStepRetries(runId: string): Promise<void> {
   expect([...completions.entries()].filter(([, count]) => count > 1)).toEqual([]);
 }
 
+async function readOwnerAbortCleanup(runId: string) {
+  const world = await getWorld();
+  const { data: events, hasMore } = await world.events.list({
+    pagination: { limit: 1000 },
+    resolveData: "none",
+    runId,
+  });
+  expect(hasMore).toBe(false);
+  const abortHooks = new Set(
+    events.flatMap((event) =>
+      event.eventType === "hook_created" && event.eventData.token?.startsWith("abrt_")
+        ? [event.correlationId]
+        : [],
+    ),
+  );
+  const streams = await Promise.all(
+    (await world.streams.list(runId))
+      .filter((name) => name.endsWith("_system_abort"))
+      .map((name) => world.streams.getInfo(runId, name)),
+  );
+  return {
+    systemHooks: abortHooks.size,
+    abortEvents: events.filter(
+      (event) => event.eventType === "hook_received" && abortHooks.has(event.correlationId),
+    ).length,
+    disposedHooks: events.filter(
+      (event) => event.eventType === "hook_disposed" && abortHooks.has(event.correlationId),
+    ).length,
+    abortChunks: streams.reduce((count, stream) => count + stream.tailIndex + 1, 0),
+    closedAbortStreams: streams.filter((stream) => stream.done).length,
+  };
+}
+
 function expectNoFailureEvents(events: readonly UnstampedMessageStreamEvent[]): void {
   const types = events.map((event) => event.type);
   for (const failureType of FAILURE_EVENT_TYPES) {
@@ -309,6 +342,22 @@ describe("turn cancellation integration", () => {
         ).toBe(true);
         await waitForTurnReceipt(owner.runId);
         await expectNoStepRetries(owner.runId);
+        expect(await readOwnerAbortCleanup(owner.runId)).toEqual({
+          systemHooks: 1,
+          abortEvents: 1,
+          disposedHooks: 0,
+          abortChunks: 1,
+          closedAbortStreams: 1,
+        });
+        const replacementRunId = starts[1]!.data.turnId.slice("turn_".length);
+        await waitForTurnReceipt(replacementRunId);
+        expect(await readOwnerAbortCleanup(replacementRunId)).toEqual({
+          systemHooks: 1,
+          abortEvents: 0,
+          disposedHooks: 1,
+          abortChunks: 0,
+          closedAbortStreams: 0,
+        });
       } finally {
         stream.dispose();
         await run.cancel();

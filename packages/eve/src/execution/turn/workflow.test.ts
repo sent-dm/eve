@@ -74,6 +74,7 @@ async function flush() {
 function testInbox() {
   const buffer: InboxEnvelope[] = [];
   let waiting: ((event: InboxEnvelope) => void) | undefined;
+  let rejectRead: ((error: Error) => void) | undefined;
   let observer: ((event: InboxEnvelope) => void) | undefined;
   let onError: ((error: unknown) => void) | undefined;
   const stop = vi.fn(() => {
@@ -86,8 +87,9 @@ function testInbox() {
     drain: vi.fn(() => buffer.splice(0)),
     next: vi.fn(
       () =>
-        new Promise<InboxEnvelope>((resolve) => {
+        new Promise<InboxEnvelope>((resolve, reject) => {
           waiting = resolve;
+          rejectRead = reject;
         }),
     ),
     response: vi.fn(async (requestId) => ({
@@ -101,7 +103,9 @@ function testInbox() {
       onError = failure;
       return stop;
     }),
-    dispose: vi.fn(async () => {}),
+    dispose: vi.fn(async () => {
+      rejectRead?.(new Error("Inbox closed."));
+    }),
   };
   return {
     inbox,
@@ -113,6 +117,7 @@ function testInbox() {
       else {
         const accept = waiting;
         waiting = undefined;
+        rejectRead = undefined;
         accept(event);
       }
     },
@@ -158,7 +163,23 @@ describe("turn workflow ownership", () => {
     expect(mocks.failTurnStep).toHaveBeenCalledWith(
       expect.objectContaining({ error: "model failed" }),
     );
+    expect(mocks.executeTurnStep.mock.calls[0]![0].abortSignal.aborted).toBe(true);
   });
+
+  it.each([false, true])(
+    "finishes without aborting the model signal (pending sleep read: %s)",
+    async (sleeping) => {
+      const actor = testInbox();
+      mocks.createOwnerInbox.mockReturnValue(actor.inbox);
+      mocks.executeTurnStep.mockResolvedValue(
+        progress(sleeping ? { sleepDurationMs: 1, sleepKey: "model-1" } : {}),
+      );
+      await expect(turnWorkflow(input)).resolves.toEqual(receipt);
+      expect(actor.inbox.dispose).toHaveBeenCalledOnce();
+      expect(actor.inbox.next).toHaveBeenCalledTimes(sleeping ? 1 : 0);
+      expect(mocks.executeTurnStep.mock.calls[0]![0].abortSignal.aborted).toBe(false);
+    },
+  );
 
   it("starts a FIFO deferral while owned without treating start failure as session failure", async () => {
     const { inbox } = testInbox();
