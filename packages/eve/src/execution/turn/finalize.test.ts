@@ -1,17 +1,19 @@
+import type { SnapshotLog } from "#execution/session/snapshots.js";
+import type { TurnCheckpointRecord } from "#execution/turn/checkpoint-log.js";
 import { accountPending } from "#execution/turn/submissions.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { failTurnStep, finalizeTurnStep } from "#execution/turn/finalize.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
-import type { InitializedSessionCheckpoint, SessionCheckpoint } from "#execution/turn/types.js";
+import type { InitializedSessionCheckpoint } from "#execution/turn/types.js";
 import { createDurableSessionState } from "#execution/session/state.js";
 import { createSessionWaitingEvent, stampMessageStreamEvent } from "#protocol/message.js";
 
 const mocks = vi.hoisted(() => ({
-  find: vi.fn(),
+  stepId: "commit",
+  open: vi.fn(),
   read: vi.fn(),
   append: vi.fn(),
-  latest: vi.fn(),
   closeSnapshots: vi.fn(),
   appendEvents: vi.fn(),
   closeEvents: vi.fn(),
@@ -29,7 +31,7 @@ const mocks = vi.hoisted(() => ({
   log: vi.fn(),
 }));
 vi.mock("#compiled/@workflow/core/index.js", () => ({
-  getStepMetadata: () => ({ stepId: "commit" }),
+  getStepMetadata: () => ({ stepId: mocks.stepId }),
   getWorkflowMetadata: () => ({ workflowRunId: "owner" }),
 }));
 vi.mock("#internal/logging.js", () => ({ createLogger: () => ({ error: mocks.log }) }));
@@ -38,10 +40,7 @@ vi.mock("#execution/turn/initialization-failure.js", () => ({
 }));
 vi.mock("#execution/session/snapshots.js", () => ({
   sessionSnapshots: {
-    find: mocks.find,
-    read: mocks.read,
-    append: mocks.append,
-    latest: mocks.latest,
+    open: mocks.open,
     close: mocks.closeSnapshots,
   },
 }));
@@ -90,9 +89,13 @@ vi.mock("#internal/workflow/runtime.js", () => ({
 vi.mock("#execution/tasks/workflow-target.js", () => ({ isTaskWorkflowTargetGone: () => false }));
 
 const resources = createSessionResources("holder", "initial");
-const records = new Map<string, SessionCheckpoint>();
-let current: SessionCheckpoint | undefined;
-const recordRef = (id: string) => ({ id }) as SnapshotRecordRef;
+const records = new Map<string, TurnCheckpointRecord>();
+const indices = new Map<string, number>();
+let current: TurnCheckpointRecord | undefined;
+function recordRef(id: string): SnapshotRecordRef {
+  if (!indices.has(id)) indices.set(id, indices.size + 1);
+  return { streamId: resources.snapshots.id, index: indices.get(id)! };
+}
 
 function checkpoint(): InitializedSessionCheckpoint {
   const state = createDurableSessionState({
@@ -133,21 +136,37 @@ function checkpoint(): InitializedSessionCheckpoint {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.stepId = "commit";
   records.clear();
   current = checkpoint();
   records.set(current.writeId, current);
-  mocks.find.mockImplementation(async (_ref, id: string) => {
-    const stored = records.get(id);
-    return stored === undefined ? undefined : { ref: recordRef(id), checkpoint: stored };
-  });
-  mocks.read.mockImplementation(async (ref: SnapshotRecordRef) => records.get(ref.id));
-  mocks.latest.mockImplementation(async () =>
-    current === undefined ? undefined : { ref: recordRef(current.writeId), checkpoint: current },
-  );
-  mocks.append.mockImplementation(async (_stream, value: SessionCheckpoint) => {
-    records.set(value.writeId, value);
-    current = value;
-    return recordRef(value.writeId);
+  indices.clear();
+  mocks.open.mockImplementation(async () => {
+    let latest: SnapshotLog<TurnCheckpointRecord>["latest"] =
+      current === undefined
+        ? undefined
+        : { ref: recordRef(current.writeId), checkpoint: records.get(current.writeId)! };
+    mocks.read.mockImplementation(async (target: SnapshotRecordRef) => {
+      const id = [...indices].find(([, index]) => index === target.index)?.[0];
+      const value = id === undefined ? undefined : records.get(id);
+      if (target.streamId !== resources.snapshots.id || value === undefined)
+        throw new Error("Unknown snapshot reference.");
+      return value;
+    });
+    mocks.append.mockImplementation(async (value: TurnCheckpointRecord) => {
+      records.set(value.writeId, value);
+      current = value;
+      const ref = recordRef(value.writeId);
+      latest = { ref, checkpoint: value };
+      return ref;
+    });
+    return {
+      get latest() {
+        return latest;
+      },
+      read: mocks.read,
+      append: mocks.append,
+    } satisfies SnapshotLog<TurnCheckpointRecord>;
   });
   mocks.finalize.mockImplementation(async (input) => ({
     sessionState: input.sessionState,
@@ -310,8 +329,71 @@ describe("turn finalization", () => {
     expect(mocks.finalize).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects an obsolete proposal before invoking settlement hooks", async () => {
+    await expect(
+      finalizeTurnStep({
+        session: resources,
+        eventIds: ["initial"],
+        checkpoint: { ...recordRef("proposal"), index: 99 },
+        kind: "natural",
+        pending: [],
+      }),
+    ).rejects.toThrow("no longer");
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.append).not.toHaveBeenCalled();
+    expect(mocks.finalize).not.toHaveBeenCalled();
+  });
+
+  it("recovers cold initialization through a compact failure attempt without a marker chain", async () => {
+    const initial = checkpoint();
+    records.clear();
+    current = {
+      phase: "entered",
+      writeId: "initialize:entered",
+      writerRunId: "owner",
+      source: { initial },
+    };
+    records.set(current.writeId, current);
+    const result = await failTurnStep({
+      session: resources,
+      eventIds: ["initial"],
+      submission: { eventId: "initial", command: { kind: "cancel" } },
+      error: "initial effects failed",
+    });
+    expect(result.terminal).toBe(true);
+    expect(records.get("commit:entered")).toMatchObject({ source: { initial } });
+    expect(records.get("commit")).toMatchObject({ phase: "terminal", state: initial.state });
+    expect(mocks.finalize).toHaveBeenCalledOnce();
+  });
+
+  it("lets a separate failure operation recover the exact committed source of an unfinished attempt", async () => {
+    const original = current as InitializedSessionCheckpoint;
+    mocks.finalize.mockRejectedValueOnce(new Error("Lost completion"));
+    await expect(
+      finalizeTurnStep({
+        session: resources,
+        eventIds: ["initial"],
+        checkpoint: recordRef("proposal"),
+        kind: "natural",
+        pending: [],
+      }),
+    ).rejects.toThrow("Lost completion");
+    mocks.stepId = "failure";
+    await failTurnStep({
+      session: resources,
+      eventIds: ["initial"],
+      submission: { eventId: "initial", command: { kind: "cancel" } },
+      error: "finalization failed",
+    });
+    expect(records.get("failure:entered")).toMatchObject({
+      source: { ref: recordRef("proposal") },
+    });
+    expect(records.get("failure")).toMatchObject({ phase: "terminal", state: original.state });
+    expect(mocks.read.mock.calls.map(([ref]) => ref)).toContainEqual(recordRef("proposal"));
+  });
+
   it("does not confuse unreadable state with an empty session", async () => {
-    mocks.latest.mockRejectedValueOnce(new Error("Storage failed"));
+    mocks.open.mockRejectedValueOnce(new Error("Storage failed"));
     await expect(
       failTurnStep({
         session: resources,
@@ -348,7 +430,8 @@ describe("turn finalization", () => {
   });
 
   it("does not repeat an uncertain bootstrap failure notification", async () => {
-    mocks.latest.mockResolvedValue(undefined);
+    records.clear();
+    current = undefined;
     mocks.appendEvents.mockRejectedValueOnce(new Error("Write completion unknown"));
     const input = {
       session: resources,

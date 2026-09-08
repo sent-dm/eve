@@ -71,18 +71,25 @@ test("builds a report from eval artifact metrics", async (t) => {
   assert.match(markdown, /sha=`abc123`/);
 });
 
-test("rejects artifacts without both stress scenarios", async (t) => {
+test("reports completed sequential timing when concurrent eval failed", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "eve-workflow-stress-report-"));
   t.after(() => rm(root, { force: true, recursive: true }));
   await writeArtifact(join(root, "2026-08-31", "evals"), "sequential.json", {
     fixture: "agent-workflow-stress",
-    samples: [{ durationMs: 1_000, turnNumber: 1 }],
+    samples: [
+      { durationMs: 1_000, turnNumber: 1 },
+      { durationMs: 900, turnNumber: 2 },
+    ],
     scenario: "sequential",
     schemaVersion: 1,
     unit: "milliseconds",
   });
 
-  await assert.rejects(collectWorkflowStressMetrics(root), /missing the concurrent scenario/);
+  const report = createWorkflowStressReport(await collectWorkflowStressMetrics(root));
+  assert.deepEqual(report.missingScenarios, ["concurrent"]);
+  assert.equal(report.scenarios.concurrent, null);
+  assert.equal(report.scenarios.sequential.warmTurns.meanMs, 900);
+  assert.match(renderWorkflowStressMarkdown(report), /Partial performance data/);
 });
 
 test("does not combine scenarios from different eval runs", async (t) => {
@@ -95,9 +102,24 @@ test("does not combine scenarios from different eval runs", async (t) => {
   await writeArtifact(olderRun, "concurrent.json", concurrentMetric());
   await writeArtifact(latestRun, "sequential.json", sequentialMetric());
 
+  const metrics = await collectWorkflowStressMetrics(root);
+  assert.equal(metrics.concurrent, undefined);
+  assert.match(metrics.runDirectory, /2026-08-31/);
+});
+
+test("does not reuse older metrics when the latest eval run produced none", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "eve-workflow-stress-report-"));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  await writeArtifact(join(root, "2026-08-30", "evals"), "sequential.json", sequentialMetric());
+  const latest = join(root, "2026-08-31", "evals");
+  await mkdir(latest, { recursive: true });
+  await writeFile(
+    join(latest, "sequential.json"),
+    JSON.stringify({ result: { logs: [] }, verdict: "failed" }),
+  );
   await assert.rejects(
     collectWorkflowStressMetrics(root),
-    /2026-08-31.*missing the concurrent scenario/,
+    /2026-08-31.*missing the sequential scenario/,
   );
 });
 

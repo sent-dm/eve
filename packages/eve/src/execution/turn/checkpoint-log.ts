@@ -1,0 +1,71 @@
+import type { SnapshotRecordRef, SnapshotStreamRef } from "#execution/session/resources.js";
+import { sessionSnapshots, type StoredSnapshot } from "#execution/session/snapshots.js";
+import type { SessionCheckpoint } from "#execution/turn/types.js";
+
+export interface CheckpointAttempt {
+  readonly phase: "entered";
+  readonly writeId: string;
+  readonly writerRunId: string;
+  readonly source: { readonly ref: SnapshotRecordRef } | { readonly initial: SessionCheckpoint };
+}
+
+export type TurnCheckpointRecord = SessionCheckpoint | CheckpointAttempt;
+
+/** Effects begin after a small durable marker; only commits copy the session state. */
+export async function openCheckpointLog(stream: SnapshotStreamRef) {
+  const log = await sessionSnapshots.open<TurnCheckpointRecord>(stream);
+  const read = async (
+    ref?: SnapshotRecordRef,
+  ): Promise<StoredSnapshot<SessionCheckpoint> | undefined> => {
+    const stored = ref === undefined ? log.latest : { ref, checkpoint: await log.read(ref) };
+    if (stored === undefined) return undefined;
+    if (stored.checkpoint.phase !== "entered")
+      return { ref: stored.ref, checkpoint: stored.checkpoint };
+    const source = stored.checkpoint.source;
+    if ("initial" in source) return { ref: stored.ref, checkpoint: source.initial };
+    const checkpoint = await log.read(source.ref);
+    if (checkpoint.phase === "entered")
+      throw new Error("A checkpoint attempt must reference committed state.");
+    return { ref: source.ref, checkpoint };
+  };
+  return {
+    get hasUncommittedEffects(): boolean {
+      return log.latest?.checkpoint.phase === "entered";
+    },
+    completed(writeId: string): StoredSnapshot<SessionCheckpoint> | undefined {
+      const head = log.latest;
+      return head?.checkpoint.writeId === writeId && head.checkpoint.phase !== "entered"
+        ? { ref: head.ref, checkpoint: head.checkpoint }
+        : undefined;
+    },
+    entered(writeId: string): boolean {
+      return log.latest?.checkpoint.writeId === `${writeId}:entered`;
+    },
+    assertCurrent(ref: SnapshotRecordRef): void {
+      if (log.latest?.ref.streamId !== ref.streamId || log.latest.ref.index !== ref.index) {
+        throw new Error("The turn checkpoint is no longer the session's current state.");
+      }
+    },
+    read,
+    begin(writeId: string, checkpoint: SessionCheckpoint, previous?: SnapshotRecordRef) {
+      const head = log.latest;
+      const source =
+        previous === undefined
+          ? { initial: checkpoint }
+          : head?.checkpoint.phase === "entered" &&
+              head.ref.index === previous.index &&
+              head.ref.streamId === previous.streamId
+            ? head.checkpoint.source
+            : { ref: previous };
+      return log.append({
+        phase: "entered",
+        writeId: `${writeId}:entered`,
+        writerRunId: checkpoint.writerRunId,
+        source,
+      });
+    },
+    commit(checkpoint: SessionCheckpoint) {
+      return log.append(checkpoint);
+    },
+  };
+}

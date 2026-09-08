@@ -67,12 +67,11 @@ async function contributeStorageFixtureStep(input: {
   "use step";
   const resources = await sessionDirectory.resolveHolder(input.holderRunId);
   const writerRunId = getWorkflowMetadata().workflowRunId;
-  const previous = await sessionSnapshots.latest<SessionStorageFixtureCheckpoint>(
-    resources.snapshots,
-  );
+  const log = await sessionSnapshots.open<SessionStorageFixtureCheckpoint>(resources.snapshots);
+  const previous = log.latest;
   const markers = [...(previous?.checkpoint.markers ?? []), input.marker];
   const bytes = Uint8Array.from([0, 255, ...new TextEncoder().encode(input.marker)]);
-  const checkpoint = await sessionSnapshots.append(resources.snapshots, {
+  const checkpoint = await log.append({
     writeId: writerRunId,
     writerRunId,
     markers,
@@ -99,6 +98,25 @@ async function contributeStorageFixtureStep(input: {
   return { checkpoint, previousMarker: previous?.checkpoint.markers.at(-1), writerRunId };
 }
 contributeStorageFixtureStep.maxRetries = 0;
+
+export async function sessionStorageReplayFixtureWorkflow(input: {
+  readonly holderRunId: string;
+  readonly checkpoint: SnapshotRecordRef;
+}): Promise<SnapshotRecordRef> {
+  "use workflow";
+  return replayStorageFixtureStep(input);
+}
+
+async function replayStorageFixtureStep(input: {
+  readonly holderRunId: string;
+  readonly checkpoint: SnapshotRecordRef;
+}): Promise<SnapshotRecordRef> {
+  "use step";
+  const resources = await sessionDirectory.resolveHolder(input.holderRunId);
+  const log = await sessionSnapshots.open<SessionStorageFixtureCheckpoint>(resources.snapshots);
+  return log.append(await log.read(input.checkpoint));
+}
+replayStorageFixtureStep.maxRetries = 0;
 
 export async function sessionStorageCloseFixtureWorkflow(holderRunId: string): Promise<void> {
   "use workflow";

@@ -3,23 +3,61 @@ import { decodeStreamLocation } from "#execution/session/stream-location.js";
 
 const READ_TIMEOUT_MS = 10_000;
 
-export function readStream<T>(id: string, startIndex?: number) {
+/** A contributor keeps owner resolution within its step, never in workflow history. */
+export function openStreamStorage(id: string) {
   const { runId, namespace } = decodeStreamLocation(id);
-  return getRun(runId).getReadable<T>({ namespace, startIndex });
+  const owner = getRun(runId);
+  const read = <T>(startIndex?: number) => owner.getReadable<T>({ namespace, startIndex });
+  const withWriter = async <T, Result>(
+    run: (writable: WritableStream<T>) => Promise<Result>,
+  ): Promise<Result> => {
+    const ops: Promise<unknown>[] = [];
+    const writable = await owner.getWritable<T>({ namespace, ops });
+    return await contribute(writable, ops, run);
+  };
+  return {
+    read,
+    async tailIndex(): Promise<number> {
+      const readable = read();
+      try {
+        return await readable.getTailIndex();
+      } finally {
+        await readable.cancel();
+      }
+    },
+    readRecord<T>(startIndex = 0): Promise<T> {
+      return readRecord(read<T>(startIndex));
+    },
+    withWriter,
+    async append<T>(records: readonly T[], close = false): Promise<void> {
+      await withWriter<T, void>(async (writable) => {
+        const writer = writable.getWriter();
+        try {
+          for (const record of records) await writer.write(record);
+          if (close) await writer.close();
+        } finally {
+          writer.releaseLock();
+        }
+      });
+    },
+  };
 }
 
-export async function streamTailIndex(id: string): Promise<number> {
-  const readable = readStream(id);
-  try {
-    return await readable.getTailIndex();
-  } finally {
-    await readable.cancel();
-  }
+export function readStream<T>(id: string, startIndex?: number) {
+  return openStreamStorage(id).read<T>(startIndex);
+}
+
+export function streamTailIndex(id: string): Promise<number> {
+  return openStreamStorage(id).tailIndex();
 }
 
 /** Reads one existing record, or waits once for holder initialization. */
-export async function readStreamRecord<T>(id: string, startIndex = 0): Promise<T> {
-  const reader = readStream<T>(id, startIndex).getReader();
+export function readStreamRecord<T>(id: string, startIndex = 0): Promise<T> {
+  return openStreamStorage(id).readRecord<T>(startIndex);
+}
+
+async function readRecord<T>(readable: ReadableStream<T>): Promise<T> {
+  const reader = readable.getReader();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
@@ -41,13 +79,19 @@ export async function readStreamRecord<T>(id: string, startIndex = 0): Promise<T
 }
 
 /** Writes stay inside one step; releasing a contributor never closes the session stream. */
-export async function withStreamWriter<T, Result>(
+export function withStreamWriter<T, Result>(
   id: string,
   run: (writable: WritableStream<T>) => Promise<Result>,
 ): Promise<Result> {
-  const { runId, namespace } = decodeStreamLocation(id);
-  const ops: Promise<unknown>[] = [];
-  const owner = (await getRun(runId).getWritable<T>({ namespace, ops })).getWriter();
+  return openStreamStorage(id).withWriter(run);
+}
+
+async function contribute<T, Result>(
+  stream: WritableStream<T>,
+  ops: readonly Promise<unknown>[],
+  run: (writable: WritableStream<T>) => Promise<Result>,
+): Promise<Result> {
+  const owner = stream.getWriter();
   // The SDK treats an unlocked writer as finished. Borrower lock gaps must not
   // settle its durability barrier before the complete callback has written.
   const writable = new WritableStream<T>({
@@ -88,18 +132,10 @@ export async function withStreamWriter<T, Result>(
   return outcome.value;
 }
 
-export async function appendStreamRecords<T>(
+export function appendStreamRecords<T>(
   id: string,
   records: readonly T[],
   close = false,
 ): Promise<void> {
-  await withStreamWriter<T, void>(id, async (writable) => {
-    const writer = writable.getWriter();
-    try {
-      for (const record of records) await writer.write(record);
-      if (close) await writer.close();
-    } finally {
-      writer.releaseLock();
-    }
-  });
+  return openStreamStorage(id).append(records, close);
 }

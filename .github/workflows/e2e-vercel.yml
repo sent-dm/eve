@@ -226,7 +226,7 @@ jobs:
             --output-format build-time
 
       - name: Report Workflow stress performance
-        if: success() && needs.changes.outputs.relevant == 'true' && matrix.name == 'agent-workflow-stress'
+        if: ${{ !cancelled() && needs.changes.outputs.relevant == 'true' && matrix.name == 'agent-workflow-stress' && hashFiles('e2e/fixtures/agent-workflow-stress/.eve/evals/**/*.json') != '' }}
         run: |
           node ./scripts/workflow-stress-report.mjs \
             --native-vercel \
@@ -236,7 +236,7 @@ jobs:
           cat .artifacts/workflow-stress-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Workflow stress performance
-        if: success() && needs.changes.outputs.relevant == 'true' && matrix.name == 'agent-workflow-stress'
+        if: ${{ !cancelled() && needs.changes.outputs.relevant == 'true' && matrix.name == 'agent-workflow-stress' && hashFiles('.artifacts/workflow-stress-report.json') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-stress-performance

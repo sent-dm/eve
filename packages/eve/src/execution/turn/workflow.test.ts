@@ -47,7 +47,7 @@ const input: TurnWorkflowInput = {
   submission: { eventId: "input", command: { kind: "send", payload: { message: "hello" } } },
 };
 const receipt: TurnReceipt = { deliveries: { input: "applied" }, terminal: false };
-const checkpoint = { id: "checkpoint" } as SnapshotRecordRef;
+const checkpoint: SnapshotRecordRef = { streamId: input.session.snapshots.id, index: 1 };
 function progress(overrides: Partial<TurnProgress> = {}): TurnExecutionResult {
   return {
     kind: "progress",

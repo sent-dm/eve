@@ -6,7 +6,7 @@ import {
   sessionDirectory,
 } from "#execution/session/directory.js";
 import { sessionEvents } from "#execution/session/events.js";
-import { createSessionResources } from "#execution/session/resources.js";
+import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
 import { sessionSnapshots } from "#execution/session/snapshots.js";
 import { createSessionStartedEvent, stampMessageStreamEvent } from "#protocol/message.js";
 
@@ -20,8 +20,12 @@ interface StoredStream {
 
 const streams = new Map<string, StoredStream>();
 let failWrite: string | undefined;
+let failAfterWrite = false;
 let pauseFlush: Promise<void> | undefined;
 let reads = 0;
+let tailReads = 0;
+let writes = 0;
+let closes = 0;
 let cancellations = 0;
 const nativeWritables: WritableStream[] = [];
 let nativeWriterAcquisitions = 0;
@@ -43,8 +47,12 @@ function stored(key: string): StoredStream {
 beforeEach(() => {
   streams.clear();
   failWrite = undefined;
+  failAfterWrite = false;
   pauseFlush = undefined;
   reads = 0;
+  tailReads = 0;
+  writes = 0;
+  closes = 0;
   cancellations = 0;
   nativeWritables.length = 0;
   nativeWriterAcquisitions = 0;
@@ -70,7 +78,12 @@ beforeEach(() => {
         },
         { highWaterMark: 0 },
       );
-      return Object.assign(stream, { getTailIndex: async () => source.chunks.length - 1 });
+      return Object.assign(stream, {
+        getTailIndex: async () => {
+          tailReads++;
+          return source.chunks.length - 1;
+        },
+      });
     },
     getWritable: async (options: { namespace?: string; ops: Promise<unknown>[] }) => {
       const key = streamKey(runId, options.namespace);
@@ -88,13 +101,16 @@ beforeEach(() => {
         if (source.closed && pending.length > 0) throw new Error("Stream is closed");
         source.chunks.push(...pending);
         if (closing) source.closed = true;
+        if (failAfterWrite) throw new Error("Write acknowledgement unavailable");
       });
       options.ops.push(flushed);
       const writable = new WritableStream({
         write(value) {
+          writes++;
           pending.push(structuredClone(value));
         },
         close() {
+          closes++;
           closing = true;
         },
       });
@@ -171,61 +187,159 @@ describe("session directory", () => {
 });
 
 describe("session snapshots", () => {
+  it("uses one head read per step and four appends for a warm execute/finalize transaction", async () => {
+    type Checkpoint = {
+      readonly writeId: string;
+      readonly history?: string[];
+      readonly previous?: SnapshotRecordRef;
+    };
+    const { snapshots } = createSessionResources("holder", "first");
+    await sessionSnapshots.initialize(snapshots);
+    const seed = await sessionSnapshots.open<Checkpoint>(snapshots);
+    const previous = await seed.append({ writeId: "previous", history: ["before"] });
+    reads = tailReads = writes = closes = 0;
+    nativeWriterAcquisitions = 0;
+    runtime.getRun.mockClear();
+
+    const execute = await sessionSnapshots.open<Checkpoint>(snapshots);
+    expect(await execute.read(previous)).toEqual({ writeId: "previous", history: ["before"] });
+    await execute.append({ writeId: "execute:entered", previous });
+    const executed = await execute.append({ writeId: "execute", history: ["before", "after"] });
+    const finalize = await sessionSnapshots.open<Checkpoint>(snapshots);
+    expect((await finalize.read(executed)).writeId).toBe("execute");
+    await finalize.append({ writeId: "finalize:entered", previous: executed });
+    await finalize.append({ writeId: "finalize", history: ["before", "after"] });
+
+    expect({
+      tailReads,
+      reads,
+      writes,
+      closes,
+      writers: nativeWriterAcquisitions,
+      runs: runtime.getRun.mock.calls.length,
+    }).toEqual({
+      tailReads: 2,
+      reads: 2,
+      writes: 4,
+      closes: 0,
+      writers: 4,
+      runs: 2,
+    });
+  });
+
   it("returns an empty initialized snapshot without waiting for a future writer", async () => {
     const { snapshots } = createSessionResources("holder", "first");
     await sessionSnapshots.initialize(snapshots);
+    await sessionSnapshots.initialize(snapshots);
     await expect(sessionSnapshots.latest(snapshots)).resolves.toBeUndefined();
+    expect(stored(snapshots.id).chunks).toHaveLength(1);
     expect(cancellations).toBeGreaterThan(0);
   });
 
-  it("keeps exact records immutable when a later checkpoint becomes latest", async () => {
+  it("keeps exact records in one open stream as later checkpoints become latest", async () => {
     const { snapshots } = createSessionResources("holder", "first");
     await sessionSnapshots.initialize(snapshots);
+    const log = await sessionSnapshots.open<{
+      writeId: string;
+      history: string[];
+      state?: Map<string, number>;
+    }>(snapshots);
     const initial = { writeId: "first:commit", history: ["one"], state: new Map([["count", 1]]) };
-    const first = await sessionSnapshots.append(snapshots, initial);
-    const second = await sessionSnapshots.append(snapshots, {
-      writeId: "second:commit",
-      history: ["one", "two"],
-    });
+    const first = await log.append(initial);
+    const next = { writeId: "second:commit", history: ["one", "two"] };
+    const second = await log.append(next);
 
+    expect(first).toEqual({ streamId: snapshots.id, index: 1 });
+    expect(second).toEqual({ streamId: snapshots.id, index: 2 });
+    expect(await log.read(first)).toEqual(initial);
     expect(await sessionSnapshots.read(first)).toEqual(initial);
     expect((await sessionSnapshots.latest(snapshots))?.ref).toEqual(second);
-    const length = stored(snapshots.id).chunks.length;
-    expect(await sessionSnapshots.append(snapshots, initial)).toEqual(first);
-    expect(stored(snapshots.id).chunks).toHaveLength(length);
-    expect((await sessionSnapshots.latest(snapshots))?.ref).toEqual(second);
-    await expect(
-      sessionSnapshots.append(snapshots, { ...initial, history: ["changed"] }),
-    ).rejects.toThrow("different state");
+    expect(await log.append(next)).toEqual(second);
+    expect(stored(snapshots.id).chunks).toHaveLength(3);
+    expect(stored(snapshots.id).closed).toBe(false);
+    expect([...streams.keys()]).toEqual([snapshots.id]);
+    await expect(log.append({ ...next, history: ["changed"] })).rejects.toThrow("different state");
+    await sessionSnapshots.close(snapshots);
+    expect(stored(snapshots.id).closed).toBe(true);
   });
 
-  it("finishes an interrupted write at the same address without republishing its head", async () => {
+  it("compares retries against the durable value even when the caller mutates its checkpoint", async () => {
     const { snapshots } = createSessionResources("holder", "first");
     await sessionSnapshots.initialize(snapshots);
-    failWrite = ".record.";
+    const log = await sessionSnapshots.open<{ writeId: string; history: string[] }>(snapshots);
     const checkpoint = { writeId: "commit", history: ["accepted"] };
-    await expect(sessionSnapshots.append(snapshots, checkpoint)).rejects.toThrow(
+    await log.append(checkpoint);
+    checkpoint.history.push("uncommitted");
+    await expect(log.append(checkpoint)).rejects.toThrow("different state");
+    expect(
+      (await sessionSnapshots.latest<{ writeId: string; history: string[] }>(snapshots))?.checkpoint
+        .history,
+    ).toEqual(["accepted"]);
+  });
+
+  it("recovers a committed write after its acknowledgement fails without appending twice", async () => {
+    const { snapshots } = createSessionResources("holder", "first");
+    await sessionSnapshots.initialize(snapshots);
+    const log = await sessionSnapshots.open<{ writeId: string; history: string[] }>(snapshots);
+    const checkpoint = { writeId: "commit", history: ["accepted"] };
+    failAfterWrite = true;
+    await expect(log.append(checkpoint)).rejects.toThrow("Write acknowledgement unavailable");
+    await expect(log.append(checkpoint)).rejects.toThrow("reopen the log");
+    expect(() => log.latest).toThrow("reopen the log");
+    failAfterWrite = false;
+    const recovered = await sessionSnapshots.open<typeof checkpoint>(snapshots);
+    expect(recovered.latest?.checkpoint).toEqual(checkpoint);
+    expect(await recovered.append(checkpoint)).toEqual({ streamId: snapshots.id, index: 1 });
+    expect(stored(snapshots.id).chunks).toHaveLength(2);
+  });
+
+  it("keeps an entered marker visible when the following checkpoint fails to commit", async () => {
+    type Entry =
+      | { writeId: string; history: string[] }
+      | { writeId: string; previous: SnapshotRecordRef };
+    const { snapshots } = createSessionResources("holder", "first");
+    await sessionSnapshots.initialize(snapshots);
+    const log = await sessionSnapshots.open<Entry>(snapshots);
+    const before = await log.append({ writeId: "before", history: [] });
+    const marker = { writeId: "execute:entered", previous: before };
+    await log.append(marker);
+    failWrite = "eve.session.snapshots";
+    await expect(log.append({ writeId: "execute", history: ["accepted"] })).rejects.toThrow(
       "Storage unavailable",
     );
-    const length = stored(snapshots.id).chunks.length;
+    await expect(log.read(before)).rejects.toThrow("reopen the log");
     failWrite = undefined;
-    const ref = await sessionSnapshots.append(snapshots, checkpoint);
-    expect(stored(snapshots.id).chunks).toHaveLength(length);
-    expect(await sessionSnapshots.latest(snapshots)).toEqual({ ref, checkpoint });
+    const reopened = await sessionSnapshots.open<Entry>(snapshots);
+    expect(reopened.latest?.checkpoint).toEqual(marker);
+    expect(await reopened.read(before)).toEqual({ writeId: "before", history: [] });
   });
 
-  it("reports an unfinished predecessor instead of restoring an older checkpoint", async () => {
-    vi.useFakeTimers();
+  it("rejects concurrent append attempts while the previous write is awaiting durability", async () => {
     const { snapshots } = createSessionResources("holder", "first");
     await sessionSnapshots.initialize(snapshots);
-    await sessionSnapshots.append(snapshots, { writeId: "before", history: [] });
-    failWrite = ".record.";
-    await expect(
-      sessionSnapshots.append(snapshots, { writeId: "unfinished", history: ["accepted"] }),
-    ).rejects.toThrow("Storage unavailable");
-    const assertion = expect(sessionSnapshots.latest(snapshots)).rejects.toThrow("timed out");
-    await vi.advanceTimersByTimeAsync(10_000);
-    await assertion;
+    const log = await sessionSnapshots.open(snapshots);
+    const flush = Promise.withResolvers<void>();
+    pauseFlush = flush.promise;
+    const first = log.append({ writeId: "first" });
+    await expect(log.append({ writeId: "second" })).rejects.toThrow("must be sequential");
+    flush.resolve();
+    expect(await first).toEqual({ streamId: snapshots.id, index: 1 });
+    expect(await log.append({ writeId: "second" })).toEqual({ streamId: snapshots.id, index: 2 });
+  });
+
+  it("reads historical records by exact index with bounded work", async () => {
+    const { snapshots } = createSessionResources("holder", "first");
+    await sessionSnapshots.initialize(snapshots);
+    const log = await sessionSnapshots.open(snapshots);
+    const first = await log.append({ writeId: "first" });
+    for (let index = 0; index < 100; index++) await log.append({ writeId: `later-${index}` });
+    reads = tailReads = 0;
+    expect(await log.read(first)).toEqual({ writeId: "first" });
+    expect({ reads, tailReads }).toEqual({ reads: 1, tailReads: 0 });
+    await expect(log.read({ ...first, index: 0 })).rejects.toThrow("Invalid session snapshot");
+    await expect(log.read({ ...first, index: 102 })).rejects.toThrow("outside this log");
+    const other = createSessionResources("other", "first").snapshots;
+    await expect(log.read({ ...first, streamId: other.id })).rejects.toThrow("outside this log");
   });
 });
 

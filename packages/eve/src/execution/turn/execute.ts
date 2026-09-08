@@ -8,7 +8,7 @@ import { getStepMetadata } from "#compiled/@workflow/core/index.js";
 import type { DeliverHookPayload, HookPayload } from "#channel/types.js";
 import type { InboxAddress } from "#execution/inbox/types.js";
 import { sessionEvents } from "#execution/session/events.js";
-import { sessionSnapshots } from "#execution/session/snapshots.js";
+import { openCheckpointLog } from "#execution/turn/checkpoint-log.js";
 import { publishSessionDescriptor } from "#execution/session/directory.js";
 import type { SessionResources, SnapshotRecordRef } from "#execution/session/resources.js";
 import { replaceDurableSessionSnapshot } from "#execution/session/state.js";
@@ -24,7 +24,6 @@ import type { ModelPayload } from "#execution/turn/model-types.js";
 import type {
   AcceptedSubmission,
   PendingSubmission,
-  SessionCheckpoint,
   InitializedSessionCheckpoint,
   TurnExecutionResult,
   TurnProgress,
@@ -53,26 +52,24 @@ export interface ExecuteTurnInput {
 export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExecutionResult> {
   "use step";
   const writeId = getStepMetadata().stepId;
-  const completed = await sessionSnapshots.find<InitializedSessionCheckpoint>(
-    input.session.snapshots,
-    writeId,
-  );
+  const snapshots = await openCheckpointLog(input.session.snapshots);
+  const completed = snapshots.completed(writeId);
   if (completed !== undefined) {
+    if (completed.checkpoint.phase === "initialization-failed")
+      throw new Error("The execution checkpoint is not initialized.");
     await acknowledgeCheckpoint(completed.checkpoint);
     return { kind: "progress", progress: projectProgress(completed.ref, completed.checkpoint) };
   }
-  const entered = await sessionSnapshots.find<SessionCheckpoint>(
-    input.session.snapshots,
-    `${writeId}:entered`,
-  );
-  if (entered !== undefined) {
+  if (snapshots.entered(writeId)) {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
     throw new Error("The previous execution attempt did not commit its effects.");
   }
-  const loaded =
-    input.checkpoint === undefined
-      ? (await sessionSnapshots.latest<SessionCheckpoint>(input.session.snapshots))?.checkpoint
-      : await sessionSnapshots.read<SessionCheckpoint>(input.checkpoint);
+  if (snapshots.hasUncommittedEffects) {
+    throw new Error("The previous turn released ownership without settling its effects.");
+  }
+  if (input.checkpoint !== undefined) snapshots.assertCurrent(input.checkpoint);
+  const previous = await snapshots.read(input.checkpoint);
+  const loaded = previous?.checkpoint;
   if (
     loaded?.phase === "initialization-failed" ||
     loaded?.phase === "terminal" ||
@@ -169,7 +166,7 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     phase: "running",
     writeId: `${writeId}:entered`,
   };
-  await sessionSnapshots.append(input.session.snapshots, checkpoint);
+  await snapshots.begin(writeId, checkpoint, previous?.ref);
   if (input.submission.eventId === input.session.initialEventId) {
     await publishSessionDescriptor(input.session.holderRunId, input.session);
   }
@@ -177,7 +174,11 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
   // Choosing another execution boundary admits the preceding model proposal.
   // Its rollback must not erase tools or child handles committed afterward.
   if (checkpoint.result !== undefined) {
-    const { cancellationState, cancellationContext, ...result } = checkpoint.result;
+    const {
+      cancellationState: _cancellationState,
+      cancellationContext: _cancellationContext,
+      ...result
+    } = checkpoint.result;
     checkpoint = { ...checkpoint, result };
   }
   const admitted = checkpoint;
@@ -355,7 +356,7 @@ export async function executeTurnStep(input: ExecuteTurnInput): Promise<TurnExec
     };
   });
   const committed: InitializedSessionCheckpoint = { ...checkpoint, writeId };
-  const ref = await sessionSnapshots.append(input.session.snapshots, committed);
+  const ref = await snapshots.commit(committed);
   await acknowledgeCheckpoint(committed);
   return { kind: "progress", progress: projectProgress(ref, committed) };
 }

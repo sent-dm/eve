@@ -8,6 +8,7 @@ import {
   sessionStorageCloseFixtureWorkflow,
   sessionStorageContributorFixtureWorkflow,
   sessionStorageHolderFixtureWorkflow,
+  sessionStorageReplayFixtureWorkflow,
   type SessionStorageFixtureCheckpoint,
 } from "#internal/testing/session-storage-workflow.js";
 import { getWorld, resumeHook, setWorld, start, type Run } from "#internal/workflow/runtime.js";
@@ -66,6 +67,7 @@ describe("session storage through native independent workflow contributors", () 
       );
       const firstResult = await first.returnValue;
       expect(firstResult).toMatchObject({ writerRunId: first.runId, previousMarker: undefined });
+      expect(firstResult.checkpoint).toEqual({ streamId: resources.snapshots.id, index: 1 });
       expect(first.runId).not.toBe(holder.runId);
       expect(await world.streams.list(first.runId)).toEqual([]);
       expect(await holder.status).toBe("running");
@@ -77,6 +79,7 @@ describe("session storage through native independent workflow contributors", () 
       });
       const secondEvent = reader.read();
       const ownerStreams = await world.streams.list(holder.runId);
+      expect(ownerStreams).toHaveLength(3);
       const openStreams = await Promise.all(
         ownerStreams.map((name) => world.streams.getInfo(holderRunId, name)),
       );
@@ -89,6 +92,7 @@ describe("session storage through native independent workflow contributors", () 
       );
       const secondResult = await second.returnValue;
       expect(secondResult).toMatchObject({ writerRunId: second.runId, previousMarker: "first" });
+      expect(secondResult.checkpoint).toEqual({ streamId: resources.snapshots.id, index: 2 });
       expect(await world.streams.list(second.runId)).toEqual([]);
       expect((await secondEvent).value).toMatchObject({
         type: "message.received",
@@ -107,6 +111,21 @@ describe("session storage through native independent workflow contributors", () 
       expect(old.state).toEqual(
         new Map([["first", Uint8Array.from([0, 255, ...new TextEncoder().encode("first")])]]),
       );
+
+      const replay = await start(
+        sessionStorageReplayFixtureWorkflow,
+        [{ holderRunId: holder.runId, checkpoint: secondResult.checkpoint }],
+        { world },
+      );
+      expect(await replay.returnValue).toEqual(secondResult.checkpoint);
+      expect(await world.streams.list(replay.runId)).toEqual([]);
+      expect(await world.streams.list(holder.runId)).toHaveLength(3);
+      const snapshotStream = holder.getReadable({ namespace: "eve.session.snapshots" });
+      try {
+        expect(await snapshotStream.getTailIndex()).toBe(2);
+      } finally {
+        await snapshotStream.cancel();
+      }
 
       const ownerRun = await world.runs.get(holder.runId, { resolveData: "none" });
       const contributorRun = await world.runs.get(second.runId, { resolveData: "none" });

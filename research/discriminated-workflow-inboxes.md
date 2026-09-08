@@ -81,13 +81,12 @@ type SessionId = Id<"session">;
 type WorkflowRunId = Id<"workflow-run">;
 type EventStreamId = Id<"event-stream">;
 type SnapshotStreamId = Id<"snapshot-stream">;
-type SnapshotRecordId = Id<"snapshot-record">;
 type EventCursor = Id<"event-cursor">;
 type EventKey = Id<"event">;
 
 type EventStreamRef = Readonly<{ id: EventStreamId }>;
 type SnapshotStreamRef = Readonly<{ id: SnapshotStreamId }>;
-type SnapshotRecordRef = Readonly<{ id: SnapshotRecordId }>;
+type SnapshotRecordRef = Readonly<{ streamId: SnapshotStreamId; index: number }>;
 
 interface InboxAddress {
   readonly token: string;
@@ -162,10 +161,20 @@ interface SessionEvents {
 }
 
 interface SessionSnapshots {
-  latest(ref: SnapshotStreamRef): Promise<SessionCheckpoint | undefined>;
+  open(ref: SnapshotStreamRef): Promise<SnapshotLog>;
   read(ref: SnapshotRecordRef): Promise<SessionCheckpoint>;
-  append(ref: SnapshotStreamRef, checkpoint: SessionCheckpoint): Promise<SnapshotRecordRef>;
   close(ref: SnapshotStreamRef): Promise<void>;
+}
+
+interface SnapshotLog {
+  readonly latest: StoredSnapshot | undefined;
+  read(ref: SnapshotRecordRef): Promise<SessionCheckpoint>;
+  append(checkpoint: SessionCheckpoint): Promise<SnapshotRecordRef>;
+}
+
+interface StoredSnapshot {
+  readonly ref: SnapshotRecordRef;
+  readonly checkpoint: SessionCheckpoint;
 }
 
 interface SessionCheckpoint {
@@ -202,7 +211,9 @@ large payload in step history.
 Here a committed checkpoint is a durably persisted record; its execution phase
 separately records whether the turn has settled and adopted its proposed result.
 
-`latest()` is a bounded read of the current committed checkpoint. It returns
+`open()` reads the tail position and its record once, within an executing step.
+The resulting log retains that position while the turn owns the exclusive claim;
+it never lives in workflow history. Its `latest` field returns
 `undefined` for initialized storage with no checkpoint; it must not wait for a
 future append while the caller holds execution ownership. A read failure is not
 an empty session. Only the descriptor's designated `initialEventId` may initialize
@@ -217,10 +228,20 @@ identity with different content fails visibly instead of replacing its record.
 Subsequent execution and finalization steps use `read(recordRef)` to restore that exact state,
 not a moving stream tail. These records live in the snapshot storage already held
 by the session. No additional holder state or workflow is needed for step handoff.
-The adapter owns efficient record addressing; a run ID or stream ID alone cannot
-identify a particular checkpoint.
+The adapter uses one append-only snapshot stream, with each serialized record at
+an exact chunk index. It creates neither a pointer index nor a separate stream per
+record. A run ID or stream ID alone cannot identify a particular checkpoint.
 Immutable records may use a bounded cache by record reference within the storage
 scope. Hydrating a mutable working state must not mutate the cached record.
+
+The turn checkpoint layer writes a compact attempt marker before effects and a
+complete checkpoint after them. Warm markers reference the preceding committed
+record; only the initial marker embeds state because no earlier record exists.
+Failure recovery reads that exact source once, without following marker chains.
+A retry checks the current head's write identity before repeating effects. An
+unfinished attempt or an obsolete handoff reference fails before new model work;
+the implementation never scans old records for a matching write. A failed append
+invalidates its local log handle because the write may already have persisted.
 
 `append` means durable append, not compare-and-swap or an atomic transaction across
 two streams. Event IDs and checkpoint write IDs remain stable on retry. The turn
@@ -582,6 +603,23 @@ checkpoint writes, step results, forwarding, and retries. Count actual requests,
 bytes, and serial dependencies as well as steps. Compare cold/warm descriptors,
 idle/busy sessions, realistic history sizes, and bootstrap separately. Hosted
 latency and cross-deployment consistency remain implementation gates.
+
+The native warm-turn integration test measures holder storage operations through
+the World API, including run metadata. Against the same SDK and isolated baseline
+commit, replacing the pointer/per-record snapshot layout with one log reduced
+these calls from 52 to 19 per turn:
+
+| Operation           | Baseline | Single snapshot log |
+| ------------------- | -------: | ------------------: |
+| Run metadata read   |       17 |                   8 |
+| Stream payload read |        7 |                   2 |
+| Stream tail read    |       13 |                   2 |
+| Stream write        |       11 |                   7 |
+| Stream close        |        4 |                   0 |
+
+Three local warm turns took 308/548/344 ms at the baseline and 229/225/227 ms with
+the log. These small local samples establish operation counts, not hosted latency.
+The CI stress report separately records client latency and native run/step timing.
 
 ## One logical inbox per receiving owner
 
@@ -972,8 +1010,9 @@ does not gate v1:
 Use unit tests for reducers, Workflow-backed scenarios for durable scheduling and
 failure boundaries, and CI fixture evals for streaming behavior (`agent-workflow-tools`,
 `fixture-tasks`, `agent-channels`). Follow [turn performance](./turn-performance.md)
-for paired measurements. Durable input ownership remains mandatory. There is no
-hosted performance result for this topology yet.
+for paired measurements. Durable input ownership remains mandatory. The first
+hosted implementation measured a 3,326 ms warm median across 99 turns; the required
+subsecond target remains a gate for the ongoing performance changes.
 
 Runtime implementation must update session/storage documentation, steering and
 `turn.interrupted` semantics, additive rekey, recovery behavior, and the Promise-based

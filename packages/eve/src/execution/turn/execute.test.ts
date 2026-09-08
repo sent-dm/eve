@@ -6,6 +6,8 @@ import {
   replaceDurableSessionSnapshot,
 } from "#execution/session/state.js";
 import { createSessionResources, type SnapshotRecordRef } from "#execution/session/resources.js";
+import type { SnapshotLog } from "#execution/session/snapshots.js";
+import type { TurnCheckpointRecord } from "#execution/turn/checkpoint-log.js";
 import { recordWorkflowToolRun } from "#harness/workflow-tool-runs.js";
 import { getAgentHandleStore, writeHandles } from "#subagents/handles/store.js";
 import type {
@@ -15,9 +17,9 @@ import type {
 } from "#execution/turn/types.js";
 
 const mocks = vi.hoisted(() => ({
-  find: vi.fn(),
+  open: vi.fn(),
+  head: vi.fn(),
   read: vi.fn(),
-  latest: vi.fn(),
   append: vi.fn(),
   publish: vi.fn(),
   model: vi.fn(),
@@ -34,10 +36,7 @@ vi.mock("#compiled/@workflow/core/index.js", () => ({
 vi.mock("#runtime/attributes/emit.js", () => ({ setEveAttributes: vi.fn() }));
 vi.mock("#execution/session/snapshots.js", () => ({
   sessionSnapshots: {
-    find: mocks.find,
-    read: mocks.read,
-    latest: mocks.latest,
-    append: mocks.append,
+    open: mocks.open,
   },
 }));
 vi.mock("#execution/session/directory.js", () => ({ publishSessionDescriptor: mocks.publish }));
@@ -65,7 +64,7 @@ vi.mock("#subagents/parent-notification.js", () => ({
 vi.mock("#execution/session-timeout-steps.js", () => ({ startSessionTimeout: vi.fn() }));
 
 const session = createSessionResources("holder", "first");
-const ref = { id: "checkpoint" } as SnapshotRecordRef;
+const ref: SnapshotRecordRef = { streamId: session.snapshots.id, index: 1 };
 const owner = { token: "inbox", ownerRunId: "candidate" };
 const submission: AcceptedSubmission = {
   eventId: "next",
@@ -93,10 +92,31 @@ beforeEach(() => {
     deliveries: {},
     queue: [],
   };
-  mocks.find.mockResolvedValue(undefined);
-  mocks.read.mockImplementation(async () => checkpoint);
-  mocks.latest.mockImplementation(async () => ({ ref, checkpoint }));
-  mocks.append.mockResolvedValue(ref);
+  mocks.head.mockImplementation(() => ({ ref, checkpoint }));
+  mocks.open.mockImplementation(async () => {
+    let latest = mocks.head() as SnapshotLog<TurnCheckpointRecord>["latest"];
+    const records = new Map<number, TurnCheckpointRecord>();
+    if (latest !== undefined) records.set(latest.ref.index, latest.checkpoint);
+    mocks.read.mockImplementation(async (target: SnapshotRecordRef) => {
+      const value = records.get(target.index);
+      if (target.streamId !== session.snapshots.id || value === undefined)
+        throw new Error("Unknown snapshot reference.");
+      return value;
+    });
+    mocks.append.mockImplementation(async (value: TurnCheckpointRecord) => {
+      const written = { streamId: session.snapshots.id, index: (latest?.ref.index ?? 0) + 1 };
+      records.set(written.index, value);
+      latest = { ref: written, checkpoint: value };
+      return written;
+    });
+    return {
+      get latest() {
+        return latest;
+      },
+      read: mocks.read,
+      append: mocks.append,
+    } satisfies SnapshotLog<TurnCheckpointRecord>;
+  });
   mocks.create.mockResolvedValue({ state });
   mocks.model.mockImplementation(async (input) => ({
     action: "continue",
@@ -129,7 +149,7 @@ const run = (changes: Partial<Parameters<typeof executeTurnStep>[0]> = {}) =>
 
 describe("turn execution boundary", () => {
   it("publishes bootstrap readiness after its first durable checkpoint and before model effects", async () => {
-    mocks.latest.mockResolvedValue(undefined);
+    mocks.head.mockReturnValue(undefined);
     const result = await run({
       submission: {
         ...submission,
@@ -143,16 +163,24 @@ describe("turn execution boundary", () => {
     expect(mocks.publish.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.model.mock.invocationCallOrder[0]!,
     );
-    expect(result).toMatchObject({ kind: "progress", progress: { checkpoint: ref } });
+    expect(result).toMatchObject({
+      kind: "progress",
+      progress: { checkpoint: { streamId: session.snapshots.id, index: 2 } },
+    });
     expect(JSON.stringify(result)).not.toContain("serializedContext");
     expect(JSON.stringify(result)).not.toContain("history");
   });
 
   it("does not replay model effects after a committed attempt, but retries its durable task acknowledgment", async () => {
     const task = { taskId: "task", taskRunId: "run", taskInboxToken: "task-inbox" };
-    mocks.find.mockResolvedValueOnce({
+    mocks.head.mockReturnValueOnce({
       ref,
-      checkpoint: { ...checkpoint, pendingTaskAcks: [task], result: { action: "continue" } },
+      checkpoint: {
+        ...checkpoint,
+        writeId: "step",
+        pendingTaskAcks: [task],
+        result: { action: "continue" },
+      },
     });
     await run();
     expect(mocks.model).not.toHaveBeenCalled();
@@ -161,8 +189,39 @@ describe("turn execution boundary", () => {
   });
 
   it("fails a previously entered attempt without repeating uncertain effects", async () => {
-    mocks.find.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ ref, checkpoint });
+    mocks.head.mockReturnValueOnce({
+      ref: { ...ref, index: 2 },
+      checkpoint: {
+        phase: "entered",
+        writeId: "step:entered",
+        writerRunId: owner.ownerRunId,
+        source: { ref },
+      },
+    });
     await expect(run()).rejects.toThrow("did not commit");
+    expect(mocks.model).not.toHaveBeenCalled();
+  });
+
+  it("rejects another owner's unfinished attempt before hydrating its prior state", async () => {
+    mocks.head.mockReturnValueOnce({
+      ref: { ...ref, index: 2 },
+      checkpoint: {
+        phase: "entered",
+        writeId: "unfinished:entered",
+        writerRunId: "previous-owner",
+        source: { ref },
+      },
+    });
+    await expect(run()).rejects.toThrow("without settling its effects");
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.append).not.toHaveBeenCalled();
+    expect(mocks.model).not.toHaveBeenCalled();
+  });
+
+  it("rejects an obsolete boundary reference before beginning model effects", async () => {
+    await expect(run({ checkpoint: { ...ref, index: 2 } })).rejects.toThrow("no longer");
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.append).not.toHaveBeenCalled();
     expect(mocks.model).not.toHaveBeenCalled();
   });
 
@@ -177,7 +236,7 @@ describe("turn execution boundary", () => {
   });
 
   it("does not turn a storage failure into an empty session", async () => {
-    mocks.latest.mockRejectedValue(new Error("storage unavailable"));
+    mocks.open.mockRejectedValueOnce(new Error("storage unavailable"));
     await expect(run()).rejects.toThrow("storage unavailable");
     expect(mocks.create).not.toHaveBeenCalled();
   });
@@ -185,7 +244,7 @@ describe("turn execution boundary", () => {
   it("retires a cancel that acquires idle ownership without inventing a model turn", async () => {
     await run({ submission: { eventId: "cancel", command: { kind: "cancel", turnId: "old" } } });
     expect(mocks.model).not.toHaveBeenCalled();
-    expect(mocks.append.mock.lastCall?.[1]).toMatchObject({
+    expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
       deliveries: { cancel: "retired" },
       result: { action: "park" },
     });
@@ -216,10 +275,10 @@ describe("turn execution boundary", () => {
       results: [],
     });
     await run({ checkpoint: ref, work: { kind: "dispatch" } });
-    expect(mocks.append.mock.lastCall?.[1]).toMatchObject({
+    expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
       pendingToolAcks: [tool],
     });
-    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
     expect(committed.result).not.toHaveProperty("cancellationState");
     expect(committed.result).not.toHaveProperty("cancellationContext");
     expect(committed.result?.cancellationState ?? committed.state).toEqual(dispatchedState);
@@ -270,7 +329,7 @@ describe("turn execution boundary", () => {
     });
 
     await run({ checkpoint: ref, work: { kind: "events", envelopes: [] } });
-    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
     const cancellationState = committed.result?.cancellationState ?? committed.state;
     expect(getAgentHandleStore(cancellationState.snapshot.session.state)?.handles).toEqual([
       handle,
@@ -291,7 +350,7 @@ describe("turn execution boundary", () => {
       serializedContext: {},
     });
     await run();
-    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[1];
+    const committed: InitializedSessionCheckpoint = mocks.append.mock.lastCall?.[0];
     expect(committed.result).toMatchObject({ cancellationState, cancellationContext });
   });
 
@@ -340,7 +399,7 @@ describe("turn execution boundary", () => {
     });
     expect(mocks.model).not.toHaveBeenCalled();
     expect(mocks.route).toHaveBeenCalledOnce();
-    expect(mocks.append.mock.lastCall?.[1]).toMatchObject({
+    expect(mocks.append.mock.lastCall?.[0]).toMatchObject({
       deliveries: { "next:response": "applied" },
       inputs: [],
       queue: [
@@ -351,7 +410,7 @@ describe("turn execution boundary", () => {
       ],
     });
     expect(
-      mocks.append.mock.lastCall?.[1].queue[0].submission.command.payload.inputResponses,
+      mocks.append.mock.lastCall?.[0].queue[0].submission.command.payload.inputResponses,
     ).toBeUndefined();
   });
 });

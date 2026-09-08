@@ -9,7 +9,7 @@ import {
 } from "./workflow-turn-profile.mjs";
 
 const PERFORMANCE_LOG_PREFIX = "EVE_WORKFLOW_STRESS_METRIC=";
-const REQUIRED_SCENARIOS = ["concurrent", "sequential"];
+const STRESS_SCENARIOS = ["concurrent", "sequential"];
 
 export async function collectWorkflowStressMetrics(artifactsRoot) {
   const artifactPaths = (await findJsonFiles(artifactsRoot)).sort();
@@ -22,6 +22,9 @@ export async function collectWorkflowStressMetrics(artifactsRoot) {
     if (!Array.isArray(logs)) {
       continue;
     }
+    const runDirectory = findEvalRunDirectory(artifactsRoot, artifactPath);
+    const metricsByScenario = metricsByRun.get(runDirectory) ?? new Map();
+    metricsByRun.set(runDirectory, metricsByScenario);
 
     for (const log of logs) {
       if (typeof log !== "string") {
@@ -36,10 +39,7 @@ export async function collectWorkflowStressMetrics(artifactsRoot) {
 
       const metric = JSON.parse(log.slice(markerIndex + PERFORMANCE_LOG_PREFIX.length));
       validateMetric(metric, artifactPath);
-      const runDirectory = findEvalRunDirectory(artifactsRoot, artifactPath);
-      const metricsByScenario = metricsByRun.get(runDirectory) ?? new Map();
       metricsByScenario.set(metric.scenario, { artifactPath, metric });
-      metricsByRun.set(runDirectory, metricsByScenario);
     }
   }
 
@@ -53,12 +53,10 @@ export async function collectWorkflowStressMetrics(artifactsRoot) {
 
   const [runDirectory, metricsByScenario] = latestRun;
 
-  for (const scenario of REQUIRED_SCENARIOS) {
-    if (!metricsByScenario.has(scenario)) {
-      throw new Error(
-        `Latest Workflow stress metric run ${runDirectory} is missing the ${scenario} scenario`,
-      );
-    }
+  if (!metricsByScenario.has("sequential")) {
+    throw new Error(
+      `Latest Workflow stress metric run ${runDirectory} is missing the sequential scenario`,
+    );
   }
 
   return {
@@ -71,14 +69,17 @@ export async function collectWorkflowStressMetrics(artifactsRoot) {
 
 export function createWorkflowStressReport(metrics, metadata = {}) {
   const sequentialSamples = metrics.sequential.metric.samples;
-  const firstConcurrentBatch = metrics.concurrent.metric.batches.find(
+  const firstConcurrentBatch = metrics.concurrent?.metric.batches.find(
     (batch) => batch.turnNumber === 1,
   );
-  const secondConcurrentBatch = metrics.concurrent.metric.batches.find(
+  const secondConcurrentBatch = metrics.concurrent?.metric.batches.find(
     (batch) => batch.turnNumber === 2,
   );
 
-  if (firstConcurrentBatch === undefined || secondConcurrentBatch === undefined) {
+  if (
+    metrics.concurrent !== undefined &&
+    (firstConcurrentBatch === undefined || secondConcurrentBatch === undefined)
+  ) {
     throw new Error("Concurrent Workflow stress metric must include turn 1 and turn 2 batches");
   }
 
@@ -86,13 +87,17 @@ export function createWorkflowStressReport(metrics, metadata = {}) {
     generatedAt: new Date().toISOString(),
     metadata,
     schemaVersion: 1,
+    missingScenarios: STRESS_SCENARIOS.filter((scenario) => metrics[scenario] === undefined),
     scenarios: {
-      concurrent: {
-        firstTurns: summarizeSamples(firstConcurrentBatch.samples),
-        firstTurnsBatchDurationMs: firstConcurrentBatch.batchDurationMs,
-        secondTurns: summarizeSamples(secondConcurrentBatch.samples),
-        secondTurnsBatchDurationMs: secondConcurrentBatch.batchDurationMs,
-      },
+      concurrent:
+        firstConcurrentBatch !== undefined && secondConcurrentBatch !== undefined
+          ? {
+              firstTurns: summarizeSamples(firstConcurrentBatch.samples),
+              firstTurnsBatchDurationMs: firstConcurrentBatch.batchDurationMs,
+              secondTurns: summarizeSamples(secondConcurrentBatch.samples),
+              secondTurnsBatchDurationMs: secondConcurrentBatch.batchDurationMs,
+            }
+          : null,
       sequential: {
         allTurns: summarizeSamples(sequentialSamples),
         coldTurn: summarizeSamples(sequentialSamples.slice(0, 1)),
@@ -105,7 +110,7 @@ export function createWorkflowStressReport(metrics, metadata = {}) {
       },
     },
     sources: {
-      concurrent: metrics.concurrent.artifactPath,
+      concurrent: metrics.concurrent?.artifactPath,
       runDirectory: metrics.runDirectory,
       sequential: metrics.sequential.artifactPath,
     },
@@ -121,14 +126,20 @@ export function renderWorkflowStressMarkdown(report) {
     ["Sequential, warm turns 2–100", sequential.warmTurns],
     ["Sequential, first 10 warm turns (2–11)", sequential.firstTenWarmTurns],
     ["Sequential, turns 91–100", sequential.lastTenTurns],
-    ["Concurrent, first turn", concurrent.firstTurns],
-    ["Concurrent, second turn", concurrent.secondTurns],
-  ];
+    ["Concurrent, first turn", concurrent?.firstTurns],
+    ["Concurrent, second turn", concurrent?.secondTurns],
+  ].filter(([, summary]) => summary !== undefined);
   const lines = [
     "## Workflow stress performance",
     "",
     "> Informational hosted measurement. Compare paired base/head runs before attributing a change; this report is not a performance gate.",
     "",
+    ...(report.missingScenarios?.length > 0
+      ? [
+          `> **Partial performance data:** no metrics for ${report.missingScenarios.join(", ")}. This report does not change the eval result; inspect the eval artifacts for failures.`,
+          "",
+        ]
+      : []),
     "| Scenario | Samples | Mean | p50 | p90 | p95 | Min | Max |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ...rows.map(([label, summary]) =>
@@ -145,7 +156,11 @@ export function renderWorkflowStressMarkdown(report) {
     ),
     "",
     `Sequential warm turn-order slope: **${sequential.sequentialTurnOrderSlopeMsPerTurn.toFixed(2)} ms/turn** (history-correlated, but also time-order confounded).`,
-    `Concurrent batch wall time: **${formatDuration(concurrent.firstTurnsBatchDurationMs)}** first turns, **${formatDuration(concurrent.secondTurnsBatchDurationMs)}** second turns.`,
+    ...(concurrent === null
+      ? []
+      : [
+          `Concurrent batch wall time: **${formatDuration(concurrent.firstTurnsBatchDurationMs)}** first turns, **${formatDuration(concurrent.secondTurnsBatchDurationMs)}** second turns.`,
+        ]),
   ];
 
   const metadata = Object.entries(report.metadata).filter(([, value]) => value !== undefined);
@@ -193,7 +208,7 @@ function validateMetric(metric, artifactPath) {
   if (
     metric?.schemaVersion !== 1 ||
     metric.fixture !== "agent-workflow-stress" ||
-    !REQUIRED_SCENARIOS.includes(metric.scenario) ||
+    !STRESS_SCENARIOS.includes(metric.scenario) ||
     metric.unit !== "milliseconds"
   ) {
     throw new Error(`Invalid Workflow stress metric in ${artifactPath}`);
