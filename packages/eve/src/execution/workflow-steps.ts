@@ -239,8 +239,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
   };
   const adapterCtx = buildAdapterContext(adapter, ctx);
 
-  // Run the adapter's deliver hook for each queued payload and
-  // coalesce the resulting StepInput values.
+  // One delivery may contain several payloads; each must reach the adapter.
   let resolved: StepInput | undefined;
   if (input.input?.kind === "deliver") {
     const results: StepInput[] = [];

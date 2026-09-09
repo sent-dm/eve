@@ -1,11 +1,5 @@
 import type { ModelMessage, TextPart, UserContent } from "ai";
 
-import type {
-  ChannelDeliveryMetadataEntry,
-  DeliverPayload,
-  SessionAuthContext,
-  TurnCaller,
-} from "#channel/types.js";
 import type { InputResponse } from "#shared/input.js";
 import type { StepInput } from "#harness/types.js";
 import { attachClientContext, readClientContext } from "#internal/client-context.js";
@@ -15,7 +9,7 @@ import { attachClientContext, readClientContext } from "#internal/client-context
  *
  * Used by the harness to coalesce deferred step input with the current
  * turn's input, and by the execution layer after calling `onDeliver`
- * for each queued delivery payload.
+ * for each payload within a delivery.
  */
 export function coalesceTurnInputs(a: StepInput, b: StepInput): StepInput {
   const inputResponses = coalesceInputResponses({
@@ -233,68 +227,4 @@ function toUserContentArray(value: string | UserContent): UserContentArray {
     return [...value];
   }
   return [];
-}
-
-/**
- * Structural shape of the workflow `DeliverHookPayload`. Using a
- * structural type keeps this helper decoupled from the concrete
- * runtime type.
- */
-interface DeliverLike {
-  readonly auth?: SessionAuthContext | null;
-  readonly caller?: TurnCaller;
-  readonly deliveryMetadata?: readonly ChannelDeliveryMetadataEntry[];
-  readonly kind: "deliver";
-  readonly payloads: readonly DeliverPayload[];
-}
-
-/**
- * Coalesces an array of deliver-like items into a single item by
- * collecting all payloads and keeping the most recent auth value.
- *
- * Used by the workflow runtime to batch follow-up deliveries that
- * arrived while a turn or subagent delegation was in progress. Each
- * payload is later passed to `onDeliver` individually so channel-
- * specific fields are never lost. A caller defines a turn boundary, so
- * callers must be partitioned before coalescing.
- */
-export function coalesceDeliveries<T extends DeliverLike>(items: readonly T[]): T {
-  const [first, ...rest] = items;
-
-  if (first === undefined) {
-    throw new Error("Cannot coalesce an empty delivery batch.");
-  }
-
-  let auth = first.auth;
-  let caller = first.caller;
-  const payloads = [...first.payloads];
-  const deliveryMetadata = [...(first.deliveryMetadata ?? [])];
-
-  for (const item of rest) {
-    const payloadOffset = payloads.length;
-    if (item.auth !== undefined) {
-      auth = item.auth;
-    }
-    if (item.caller !== undefined) {
-      if (caller !== undefined) {
-        throw new Error("Cannot coalesce deliveries from different turns.");
-      }
-      caller = item.caller;
-    }
-    payloads.push(...item.payloads);
-    deliveryMetadata.push(
-      ...(item.deliveryMetadata ?? []).map((entry) => ({
-        ...entry,
-        payloadIndex: entry.payloadIndex + payloadOffset,
-      })),
-    );
-  }
-
-  return {
-    ...first,
-    auth,
-    caller,
-    deliveryMetadata: deliveryMetadata.length === 0 ? undefined : deliveryMetadata,
-    payloads,
-  };
 }

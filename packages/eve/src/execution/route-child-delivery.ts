@@ -81,9 +81,8 @@ export async function routeDeliverToChildren(input: {
     sessionState = emitted.sessionState;
   }
 
-  // Child settlement carries the authoritative parked/terminal handle verdict
-  // and is enqueued before the task's terminal view. Preserve that ordering
-  // when several task deliveries are coalesced into one parent turn.
+  // Child settlement carries the authoritative parked/terminal handle verdict.
+  // Apply it before recording terminal views in the same delivery.
   if ((payload.task?.views?.length ?? 0) > 0) {
     sessionState = await recordTerminalTaskViewsStep({
       sessionState,

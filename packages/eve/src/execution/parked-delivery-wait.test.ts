@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DeliverHookPayload } from "#channel/types.js";
+import type { DeliverHookPayload, SessionAuthContext } from "#channel/types.js";
 import { nextTurnDelivery } from "#execution/parked-delivery-wait.js";
 import { routeDeliverToChildren } from "#execution/route-child-delivery.js";
 import type {
@@ -96,8 +96,6 @@ function messageRead(message: string): ScriptedRead {
   };
 }
 
-// Routing never runs in these tests: scripted reads stop at authorization
-// instructions or exhaust before any deliver-kind turn payload.
 const sessionState = { sessionId: "ses-parked-wait" } as DurableSessionState;
 
 function waitInput(inbox: SessionCommandInbox): Parameters<typeof nextTurnDelivery>[0] {
@@ -114,6 +112,157 @@ function waitInput(inbox: SessionCommandInbox): Parameters<typeof nextTurnDelive
 describe("nextTurnDelivery", () => {
   afterEach(() => {
     vi.mocked(routeDeliverToChildren).mockReset();
+  });
+
+  it.each([
+    { principalId: "carol", title: "different users" },
+    { principalId: "bob", title: "the same user" },
+    { principalId: null, title: "an anonymous follow-up" },
+  ])("keeps queued requests separate for $title", async ({ principalId }) => {
+    const auth = (id: string): SessionAuthContext => ({
+      attributes: {},
+      authenticator: "test",
+      principalId: id,
+      principalType: "user",
+    });
+    const delivery = (id: string, principal: SessionAuthContext | null): DeliverHookPayload => ({
+      auth: principal,
+      deliveryMetadata: [
+        { channelKind: "slack", channelName: "slack", deliveryId: id, payloadIndex: 0 },
+      ],
+      kind: "deliver",
+      payloads: [
+        {
+          context: [`Context for ${id}`],
+          message: [
+            { type: "text", text: `Message for ${id}` },
+            { type: "file", data: "ZmlsZQ==", filename: `${id}.txt`, mediaType: "text/plain" },
+          ],
+        },
+      ],
+      requestId: `request-${id}`,
+      turnPolicy: "queue",
+    });
+    const first = delivery("first", auth("bob"));
+    const second = delivery("second", principalId === null ? null : auth(principalId));
+    const input = {
+      ...waitInput(createMockInbox([])),
+      bufferedDeliveries: [first, second],
+    };
+    vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+      kind: "continue",
+      remainder: input.delivery,
+      serializedContext: input.serializedContext,
+      sessionState: input.sessionState,
+    }));
+
+    expect(await nextTurnDelivery(input)).toEqual({ delivery: first, kind: "turn" });
+    expect(input.bufferedDeliveries).toEqual([second]);
+    expect(await nextTurnDelivery(input)).toEqual({ delivery: second, kind: "turn" });
+    expect(input.bufferedDeliveries).toEqual([]);
+    expect(vi.mocked(routeDeliverToChildren).mock.calls.map(([input]) => input.delivery)).toEqual([
+      first,
+      second,
+    ]);
+  });
+
+  it("preserves task and callback ownership without absorbing adjacent deliveries", async () => {
+    const caller = {
+      callId: "delegation",
+      replyTo: { kind: "hook" as const, token: "child-reply" },
+      subagentName: "research",
+    };
+    const deliveries: DeliverHookPayload[] = [
+      { kind: "deliver", payloads: [{ context: ["Background update"] }] },
+      {
+        caller,
+        kind: "deliver",
+        payloads: [{ message: "Delegated request" }, { context: ["Same request context"] }],
+      },
+      { kind: "deliver", payloads: [{ message: "Ordinary request" }] },
+      {
+        kind: "deliver",
+        payloads: [{ context: ["Task result"] }],
+        taskDeliveryId: "task-1:result",
+      },
+    ];
+    const input = {
+      ...waitInput(createMockInbox([])),
+      bufferedDeliveries: [...deliveries],
+    };
+    vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+      kind: "continue",
+      remainder: input.delivery,
+      serializedContext: input.serializedContext,
+      sessionState: input.sessionState,
+    }));
+
+    for (const delivery of deliveries) {
+      expect(await nextTurnDelivery(input)).toEqual({ delivery, kind: "turn" });
+    }
+    expect(input.bufferedDeliveries).toEqual([]);
+  });
+
+  it("handles session controls and skips cancelled tasks before the next queued request", async () => {
+    const cancelled: DeliverHookPayload = {
+      kind: "deliver",
+      payloads: [{ message: "Cancelled task request" }],
+      taskDeliveryId: "task-1:request",
+    };
+    const message: DeliverHookPayload = { kind: "deliver", payloads: [{ message: "Next" }] };
+    const input = {
+      ...waitInput(createMockInbox([])),
+      bufferedDeliveries: [cancelled, message],
+      bufferedSessionControls: ["clear" as const],
+      cancelledTaskIds: new Set(["task-1"]),
+    };
+    vi.mocked(routeDeliverToChildren).mockResolvedValue({
+      kind: "continue",
+      remainder: message,
+      serializedContext: {},
+      sessionState,
+    });
+
+    expect(await nextTurnDelivery(input)).toEqual({ kind: "clear" });
+    expect(input.bufferedDeliveries).toEqual([cancelled, message]);
+    expect(await nextTurnDelivery(input)).toEqual({ delivery: message, kind: "turn" });
+    expect(vi.mocked(routeDeliverToChildren).mock.calls.map(([input]) => input.delivery)).toEqual([
+      message,
+    ]);
+    expect(input.bufferedDeliveries).toEqual([]);
+  });
+
+  it("routes a buffered child response without merging it into the next message", async () => {
+    const response: DeliverHookPayload = {
+      auth: null,
+      kind: "deliver",
+      payloads: [{ inputResponses: [{ requestId: "child-question", text: "Yes" }] }],
+    };
+    const message: DeliverHookPayload = { kind: "deliver", payloads: [{ message: "Next" }] };
+    const input = {
+      ...waitInput(createMockInbox([])),
+      bufferedDeliveries: [response, message],
+    };
+    vi.mocked(routeDeliverToChildren)
+      .mockResolvedValueOnce({
+        kind: "continue",
+        remainder: undefined,
+        serializedContext: {},
+        sessionState,
+      })
+      .mockResolvedValueOnce({
+        kind: "continue",
+        remainder: message,
+        serializedContext: {},
+        sessionState,
+      });
+
+    expect(await nextTurnDelivery(input)).toEqual({ delivery: message, kind: "turn" });
+    expect(vi.mocked(routeDeliverToChildren).mock.calls.map(([input]) => input.delivery)).toEqual([
+      response,
+      message,
+    ]);
+    expect(input.bufferedDeliveries).toEqual([]);
   });
 
   it("surfaces an authorization callback as its own instruction", async () => {

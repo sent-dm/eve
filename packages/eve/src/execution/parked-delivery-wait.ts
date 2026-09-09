@@ -9,7 +9,6 @@ import {
   SessionInboxWireError,
   type DecodedSessionInbox,
 } from "#execution/wire/session-inbox-wire.js";
-import { coalesceDeliveries } from "#harness/messages.js";
 
 type NextSessionAction =
   | { readonly kind: "clear" }
@@ -273,26 +272,6 @@ function takeBufferedTurnDelivery(bufferedDeliveries: DeliverHookPayload[]): Del
     throw new Error("Cannot take a turn delivery from an empty buffer.");
   }
 
-  const turnDeliveries = [first];
-  let caller = first.caller;
-  while (bufferedDeliveries.length > 0) {
-    const next = bufferedDeliveries[0];
-    if (
-      next === undefined ||
-      first.taskDeliveryId !== undefined ||
-      next.taskDeliveryId !== undefined ||
-      (caller !== undefined && next.caller !== undefined)
-    ) {
-      break;
-    }
-
-    const delivery = bufferedDeliveries.shift();
-    if (delivery === undefined) {
-      throw new Error("Buffered turn delivery disappeared while partitioning.");
-    }
-    turnDeliveries.push(delivery);
-    caller ??= delivery.caller;
-  }
-
-  return coalesceDeliveries(turnDeliveries);
+  // Auth belongs to this delivery, not to the session's entire pending queue.
+  return first;
 }
