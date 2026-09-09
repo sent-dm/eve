@@ -1,5 +1,15 @@
 # eve
 
+## 0.52.4
+
+### Patch Changes
+
+- 97fccac: Dynamic tools with non-durable presentation labels now remain available and fall back to their tool names.
+- d74fdb4: Add a Datadog eval reporter that creates one LLM Observability Experiment per eve eval run and submits eval assertion metrics through the optional `dd-trace` package. Opted-in eval inputs are pushed as versioned dataset records and linked to their experiment rows. The integration is tested against the public dataset and external Experiment APIs in `dd-trace@6.13.0`.
+- 8946bd5: Enable configured deployments to edit an agent source checkout and publish changes as draft GitHub pull requests. Registry setup installs official registry items in the disposable checkout, provisions a repository-scoped Vercel Connect GitHub connector, and can continue without secrets in headless environments; manual and self-hosted deployments can use a fine-grained GitHub PAT.
+- b3ce510: Only suppress a response when the empty-delivery marker is the entire response, apart from surrounding whitespace. Replies that quote or explain the marker are now delivered and retained in conversation history.
+- 6d12a70: Forward inherited activity observation when background tasks start local or remote subagents, so their tool activity appears beneath the task row.
+
 ## 0.52.3
 
 ### Patch Changes
