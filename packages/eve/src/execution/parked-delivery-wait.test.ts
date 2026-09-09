@@ -116,7 +116,6 @@ describe("nextTurnDelivery", () => {
 
   it.each([
     { principalId: "carol", title: "different users" },
-    { principalId: "bob", title: "the same user" },
     { principalId: null, title: "an anonymous follow-up" },
   ])("keeps queued requests separate for $title", async ({ principalId }) => {
     const auth = (id: string): SessionAuthContext => ({
@@ -165,6 +164,150 @@ describe("nextTurnDelivery", () => {
       second,
     ]);
   });
+
+  it("batches only adjacent deliveries with equivalent full auth and preserves payload metadata", async () => {
+    const auth: SessionAuthContext = {
+      attributes: { scopes: ["read", "write"], team: "support" },
+      authenticator: "slack",
+      issuer: "workspace",
+      principalId: "bob",
+      principalType: "user",
+      subject: "bob-subject",
+    };
+    const delivery = (id: string, principal = auth): DeliverHookPayload => ({
+      auth: principal,
+      kind: "deliver",
+      payloads: [{ message: id, context: [`Context for ${id}`] }],
+      deliveryMetadata: [
+        { channelKind: "slack", channelName: "slack", deliveryId: id, payloadIndex: 0 },
+      ],
+    });
+    const first = delivery("first");
+    const second = delivery("second", {
+      ...auth,
+      attributes: { team: "support", scopes: ["read", "write"] },
+    });
+    const third = delivery("third", { ...auth, principalId: "carol" });
+    const fourth = delivery("fourth");
+    const input = {
+      ...waitInput(createMockInbox([])),
+      bufferedDeliveries: [first, second, third, fourth],
+    };
+    vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+      kind: "continue",
+      remainder: input.delivery,
+      serializedContext: input.serializedContext,
+      sessionState: input.sessionState,
+    }));
+
+    expect(await nextTurnDelivery(input)).toEqual({
+      kind: "turn",
+      delivery: {
+        ...first,
+        payloads: [...first.payloads, ...second.payloads],
+        deliveryMetadata: [
+          first.deliveryMetadata![0],
+          { ...second.deliveryMetadata![0], payloadIndex: 1 },
+        ],
+      },
+    });
+    expect(input.bufferedDeliveries).toEqual([third, fourth]);
+    expect(await nextTurnDelivery(input)).toEqual({ kind: "turn", delivery: third });
+    expect(await nextTurnDelivery(input)).toEqual({ kind: "turn", delivery: fourth });
+    expect(input.bufferedDeliveries).toEqual([]);
+  });
+
+  it.each([
+    { authenticator: "another-authenticator" },
+    { issuer: "another-issuer" },
+    { principalType: "service" },
+    { subject: "another-subject" },
+    { attributes: { scopes: ["write"] } },
+  ])("keeps same-principal deliveries separate when auth changes: %j", async (change) => {
+    const auth: SessionAuthContext = {
+      attributes: { scopes: ["read"] },
+      authenticator: "test",
+      issuer: "issuer",
+      principalId: "bob",
+      principalType: "user",
+      subject: "subject",
+    };
+    const first: DeliverHookPayload = { auth, kind: "deliver", payloads: [{ message: "First" }] };
+    const second: DeliverHookPayload = {
+      auth: { ...auth, ...change },
+      kind: "deliver",
+      payloads: [{ message: "Second" }],
+    };
+    const input = { ...waitInput(createMockInbox([])), bufferedDeliveries: [first, second] };
+    vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+      kind: "continue",
+      remainder: input.delivery,
+      serializedContext: input.serializedContext,
+      sessionState: input.sessionState,
+    }));
+    expect(await nextTurnDelivery(input)).toEqual({ kind: "turn", delivery: first });
+    expect(input.bufferedDeliveries).toEqual([second]);
+  });
+
+  it.each([
+    null,
+    undefined,
+    {
+      attributes: {},
+      authenticator: "none",
+      principalId: "anonymous",
+      principalType: "anonymous",
+    },
+  ])("does not batch deliveries without an authenticated identity: %j", async (auth) => {
+    const first: DeliverHookPayload = { auth, kind: "deliver", payloads: [{ message: "First" }] };
+    const second: DeliverHookPayload = { auth, kind: "deliver", payloads: [{ message: "Second" }] };
+    const input = { ...waitInput(createMockInbox([])), bufferedDeliveries: [first, second] };
+    vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+      kind: "continue",
+      remainder: input.delivery,
+      serializedContext: input.serializedContext,
+      sessionState: input.sessionState,
+    }));
+    expect(await nextTurnDelivery(input)).toEqual({ kind: "turn", delivery: first });
+    expect(input.bufferedDeliveries).toEqual([second]);
+  });
+
+  it.each(["task", "caller"] as const)(
+    "preserves %s turn boundaries even when auth matches",
+    async (boundary) => {
+      const auth: SessionAuthContext = {
+        attributes: {},
+        authenticator: "test",
+        principalId: "bob",
+        principalType: "user",
+      };
+      const deliveries: DeliverHookPayload[] = ["first", "second"].map((id) => ({
+        auth,
+        kind: "deliver",
+        payloads: [{ message: id }],
+        ...(boundary === "task"
+          ? { taskDeliveryId: id }
+          : {
+              caller: {
+                callId: id,
+                subagentName: "research",
+                replyTo: { kind: "hook" as const, token: id },
+              },
+            }),
+      }));
+      const input = { ...waitInput(createMockInbox([])), bufferedDeliveries: [...deliveries] };
+      vi.mocked(routeDeliverToChildren).mockImplementation(async (input) => ({
+        kind: "continue",
+        remainder: input.delivery,
+        serializedContext: input.serializedContext,
+        sessionState: input.sessionState,
+      }));
+      for (const delivery of deliveries) {
+        expect(await nextTurnDelivery(input)).toEqual({ kind: "turn", delivery });
+      }
+      expect(input.bufferedDeliveries).toEqual([]);
+    },
+  );
 
   it("preserves task and callback ownership without absorbing adjacent deliveries", async () => {
     const caller = {

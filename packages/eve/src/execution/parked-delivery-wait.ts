@@ -1,4 +1,5 @@
 import type { DeliverHookPayload, DeliverPayload } from "#channel/types.js";
+import { jsonValuesEqual } from "#shared/json.js";
 import { cancelAllIndexedSessionTasksStep } from "#execution/cancel-indexed-session-tasks-step.js";
 import { routeDeliverToChildren } from "#execution/route-child-delivery.js";
 import type { SessionCommandInbox } from "#execution/session-command-inbox.js";
@@ -272,6 +273,45 @@ function takeBufferedTurnDelivery(bufferedDeliveries: DeliverHookPayload[]): Del
     throw new Error("Cannot take a turn delivery from an empty buffer.");
   }
 
-  // Auth belongs to this delivery, not to the session's entire pending queue.
-  return first;
+  // Missing auth does not establish a shared identity, even for two anonymous sends.
+  if (
+    first.auth == null ||
+    first.auth.principalType === "anonymous" ||
+    first.taskDeliveryId !== undefined
+  ) {
+    return first;
+  }
+
+  const payloads = [...first.payloads];
+  const deliveryMetadata = [...(first.deliveryMetadata ?? [])];
+  let caller = first.caller;
+  while (bufferedDeliveries.length > 0) {
+    const next = bufferedDeliveries[0];
+    if (
+      next === undefined ||
+      next.taskDeliveryId !== undefined ||
+      (caller !== undefined && next.caller !== undefined) ||
+      !jsonValuesEqual(first.auth, next.auth)
+    ) {
+      break;
+    }
+
+    bufferedDeliveries.shift();
+    const payloadOffset = payloads.length;
+    payloads.push(...next.payloads);
+    deliveryMetadata.push(
+      ...(next.deliveryMetadata ?? []).map((entry) => ({
+        ...entry,
+        payloadIndex: entry.payloadIndex + payloadOffset,
+      })),
+    );
+    caller ??= next.caller;
+  }
+
+  return {
+    ...first,
+    caller,
+    deliveryMetadata: deliveryMetadata.length === 0 ? undefined : deliveryMetadata,
+    payloads,
+  };
 }
