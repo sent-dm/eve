@@ -79,16 +79,25 @@ export async function emitTurnPreamble(
   emitFn: HarnessEmitFn,
   input: StepInput,
   state: HarnessEmissionState,
+  messages: readonly ModelMessage[],
   runtimeIdentity?: RuntimeIdentity,
   traceContext?: RuntimeTraceContext,
 ): Promise<HarnessEmissionState> {
-  const turnId = `turn_${state.sequence}`;
+  // Steering re-enters an open turn: keep its id and step index and skip the
+  // `turn.started` it already emitted.
+  const steering = state.turnId !== "";
+  const turnId = steering ? state.turnId : `turn_${state.sequence}`;
 
   if (!state.sessionStarted) {
     await emitFn(createSessionStartedEvent({ runtime: runtimeIdentity, trace: traceContext }));
   }
 
-  await emitFn(createTurnStartedEvent({ sequence: state.sequence, trace: traceContext, turnId }));
+  if (!steering) {
+    await emitFn(
+      createTurnStartedEvent({ sequence: state.sequence, trace: traceContext, turnId }),
+      messages,
+    );
+  }
 
   if (input.message !== undefined) {
     await emitFn(
@@ -100,12 +109,15 @@ export async function emitTurnPreamble(
     );
   }
 
-  return {
+  const nextState: HarnessEmissionState = {
     sessionStarted: true,
     sequence: state.sequence,
-    stepIndex: 0,
+    stepIndex: steering ? state.stepIndex : 0,
     turnId,
   };
+  return steering && state.assistantOutputStarted
+    ? { ...nextState, assistantOutputStarted: true }
+    : nextState;
 }
 
 /**
@@ -688,7 +700,11 @@ async function consumeStreamContent(
 
   // Channel adapters deliver terminal completions, so the reserved marker
   // becomes a null completion without delaying normal streaming deltas.
-  if (finishReason !== "tool-calls" && hasEmptyDeliverySentinel(currentMessage)) {
+  if (
+    finishReason !== "content-filter" &&
+    finishReason !== "tool-calls" &&
+    hasEmptyDeliverySentinel(currentMessage)
+  ) {
     await emitFn(
       createMessageCompletedEvent({
         finishReason,
@@ -698,7 +714,7 @@ async function consumeStreamContent(
         turnId: state.turnId,
       }),
     );
-  } else if (currentMessage.trim().length > 0) {
+  } else if (finishReason !== "content-filter" && currentMessage.trim().length > 0) {
     await emitFn(
       createMessageCompletedEvent({
         finishReason,

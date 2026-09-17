@@ -53,6 +53,7 @@ export type CreateRuntime = (config: {
  * Input for building a harness step for one resolved runtime node.
  */
 export interface CreateExecutionNodeStepInput {
+  readonly steeringSignal?: AbortSignal;
   /** Cancellation signal forwarded to the tool-loop harness. */
   readonly abortSignal?: AbortSignal;
   /**
@@ -78,11 +79,6 @@ export interface CreateExecutionNodeStepInput {
   readonly mode: RunMode;
   readonly modelResolutionScope: RuntimeModelResolutionScope;
   readonly node: ResolvedRuntimeAgentNode;
-  /**
-   * Effective `maxSubagents` cap configured by the experimental Workflow tool
-   * definition and materialized on the session at creation.
-   */
-  readonly workflowMaxSubagents?: number;
 }
 
 /**
@@ -97,17 +93,17 @@ export function createExecutionNodeStep(input: CreateExecutionNodeStepInput): St
       : createRuntimeDynamicModelEventDispatcher(
           input.modelResolutionScope,
           input.node.turnAgent.dynamicModel,
+          input.abortSignal,
         );
   const tools = createNodeHarnessTools({ node: input.node });
   const instrumentation = input.instrumentation;
   const sessionInstrumentation = instrumentation?.prepareExecution();
   const step = createToolLoopHarness({
+    steeringSignal: input.steeringSignal,
     abortSignal: input.abortSignal,
     capabilities: input.capabilities,
     clearOnly: input.clearOnly,
     compactOnly: input.compactOnly,
-    workflow: input.node.agent.workflowTool !== undefined,
-    workflowMaxSubagents: input.workflowMaxSubagents,
     handleEvent: input.handleEvent,
     historyProjector: input.historyProjector,
     historyView: input.historyView,
@@ -174,9 +170,11 @@ function createRuntimeModelResolver(
 function createRuntimeDynamicModelEventDispatcher(
   scope: RuntimeModelResolutionScope,
   dynamicModel: NonNullable<ResolvedRuntimeAgentNode["turnAgent"]["dynamicModel"]>,
+  abortSignal: AbortSignal | undefined,
 ): NonNullable<Parameters<typeof createToolLoopHarness>[0]["dispatchDynamicModelEvent"]> {
   return (input) =>
     dispatchDynamicModelEvent({
+      abortSignal,
       ctx: input.ctx,
       dynamicModel,
       event: input.event,
@@ -222,6 +220,7 @@ function resolveHarnessToolDefinition(input: {
       return createPreparedWorkflowToolHarnessDefinition(input.tool);
     }
     return createWorkflowToolHarnessDefinition({
+      executeInput: registeredTool.definition.executeInput,
       definition: createRegisteredHarnessToolDefinition({
         behavior: input.tool.behavior,
         definition: registeredTool.definition,
@@ -287,6 +286,7 @@ function createRegisteredHarnessToolDefinition(input: {
     behavior: input.behavior,
     description: def.description,
     execution: def.execution,
+    executeInput: def.executeInput,
     execute: isFrameworkRequestInput
       ? undefined
       : resolveAuthoredExecute({

@@ -7,13 +7,13 @@ import { resolveSelfModificationMode } from "./mode.js";
 afterEach(() => {
   delete process.env.EVE_DEV;
   delete process.env.EVE_SELF_MODIFICATION_GITHUB_TOKEN;
-  delete process.env.VERCEL_ENV;
 });
 
 const deployed = {
   deployed: {
     source: { git: { directory: "apps/weather", repository: "github.com/vercel/eve" } },
     target: { branch: "main" },
+    authorize: () => true,
     credentials: { pat: true },
   },
 } as const;
@@ -48,15 +48,16 @@ describe("self-modification deployed configuration", () => {
     ).toThrow("must explicitly configure");
   });
 
-  it("resolves a Vercel Connect connector only in Vercel Production", () => {
+  it("resolves an application-supplied credential provider", () => {
+    const provider = { resolve: async () => "github-token" };
     const config = resolveSelfModificationConfig({
       deployed: {
         ...deployed.deployed,
-        credentials: { vercelConnect: { connector: "github/selfmod-vercel-eve" } },
+        credentials: provider,
       },
     });
-    expect(resolveSelfModificationMode(config)).toBe("disabled");
-    process.env.VERCEL_ENV = "production";
+
+    expect(config.deployed?.credentials).toEqual({ kind: "provider", provider });
     expect(resolveSelfModificationMode(config)).toBe("deployed");
   });
 
@@ -77,7 +78,19 @@ describe("self-modification deployed configuration", () => {
   it("requires complete deployed configuration", () => {
     expect(() =>
       resolveSelfModificationConfig({ deployed: { source: deployed.deployed.source } } as never),
-    ).toThrow("both source and target");
+    ).toThrow("source, target, and authorization");
+  });
+
+  it("requires a deployed authorization policy", () => {
+    expect(() => {
+      const { authorize: _authorize, ...withoutAuthorize } = deployed.deployed;
+      resolveSelfModificationConfig({ deployed: withoutAuthorize } as never);
+    }).toThrow("source, target, and authorization");
+    expect(() =>
+      resolveSelfModificationConfig({
+        deployed: { ...deployed.deployed, authorize: true as never },
+      }),
+    ).toThrow("authorize must be a function");
   });
 
   it("rejects ambiguous or malformed credential configuration", () => {
@@ -85,30 +98,53 @@ describe("self-modification deployed configuration", () => {
       resolveSelfModificationConfig({
         deployed: {
           ...deployed.deployed,
-          credentials: { pat: true, vercelConnect: { connector: "github/example" } },
+          credentials: { pat: true, resolve: async () => "token" },
         },
       }),
-    ).toThrow("exactly one");
+    ).toThrow("not both");
     expect(() =>
       resolveSelfModificationConfig({
         deployed: { ...deployed.deployed, credentials: { pat: false } as never },
       }),
     ).toThrow("pat must be true");
+    expect(() =>
+      resolveSelfModificationConfig({
+        deployed: { ...deployed.deployed, credentials: { resolve: true } as never },
+      }),
+    ).toThrow("resolve function");
   });
 
   it.each([
     [null, "configuration must be an object"],
     [{ local: null }, "local must be an object"],
     [
-      { deployed: { source: null, target: deployed.deployed.target } },
+      {
+        deployed: {
+          authorize: deployed.deployed.authorize,
+          source: null,
+          target: deployed.deployed.target,
+        },
+      },
       "deployed.source must be an object",
     ],
     [
-      { deployed: { source: {}, target: deployed.deployed.target } },
+      {
+        deployed: {
+          authorize: deployed.deployed.authorize,
+          source: {},
+          target: deployed.deployed.target,
+        },
+      },
       "deployed.source.git must be an object",
     ],
     [
-      { deployed: { source: deployed.deployed.source, target: null } },
+      {
+        deployed: {
+          authorize: deployed.deployed.authorize,
+          source: deployed.deployed.source,
+          target: null,
+        },
+      },
       "deployed.target must be an object",
     ],
   ])("rejects malformed nested configuration", (config, message) => {

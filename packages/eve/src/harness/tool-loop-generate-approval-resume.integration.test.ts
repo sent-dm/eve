@@ -12,21 +12,24 @@ import type { OldSourceOffsetDynamicToolMetadata } from "#context/dynamic-tool-m
 import { PendingSkillAnnouncementKey } from "#context/dynamic-skill-lifecycle.js";
 import {
   AuthKey,
+  HistoryStateKey,
   SessionKey,
   SessionIdKey,
   SessionDynamicToolMetadataKey,
   TurnDynamicToolMetadataKey,
   StepDynamicToolMetadataKey,
-  TurnTaskStateKey,
+  TurnTaskDeliveryKey,
 } from "#context/keys.js";
 import { setHarnessEmissionState } from "#harness/emission.js";
 import type { HarnessToolDefinition } from "#harness/execute-tool.js";
 import type { InputRequest } from "#shared/input.js";
 import { appendPendingInputBatch, getApprovedTools } from "#harness/input-requests.js";
+import type { HarnessModelMessage } from "#harness/messages.js";
 import { getPendingInputBatches } from "#harness/pending-input-batches.js";
 import { createToolLoopHarness } from "#harness/tool-loop.js";
 import { setTurnUsageState } from "#harness/turn-tag-state.js";
 import type { HarnessSession, ToolLoopHarnessConfig } from "#harness/types.js";
+import { recordSessionTask } from "#tasks/session-index.js";
 import { once } from "#tools/approval/policies.js";
 import { defineTool } from "#tools/definition.js";
 import {
@@ -115,7 +118,7 @@ const secondApprovalRequest = {
   type: "tool-approval-request" as const,
 };
 
-function createBaseSession(history?: readonly ModelMessage[]): HarnessSession {
+function createBaseSession(history?: readonly HarnessModelMessage[]): HarnessSession {
   return {
     agent: {
       modelReference: { id: "generate-approval-resume-model" },
@@ -130,7 +133,7 @@ function createBaseSession(history?: readonly ModelMessage[]): HarnessSession {
     },
     compaction: { recentWindowSize: 10, threshold: 100_000 },
     continuationToken: "http:generate-approval-resume-session",
-    history: [...(history ?? [{ content: "Run pwd.", role: "user" }])],
+    history: [...(history ?? [{ content: "Run pwd.", kind: "user" as const, role: "user" }])],
     sessionId: "generate-approval-resume-session",
   };
 }
@@ -154,7 +157,7 @@ const pendingApprovalInputRequest: InputRequest = {
 };
 
 function createPendingApprovalSession(
-  history?: readonly ModelMessage[],
+  history?: readonly HarnessModelMessage[],
   responseAuthorization = false,
 ): HarnessSession {
   return appendPendingInputBatch({
@@ -836,12 +839,15 @@ describe("tool loop generate approval resume (real AI SDK)", () => {
   // and the provider rejected the prompt with a tool call that had no output.
   it.each(
     [
-      { key: PendingSkillAnnouncementKey, label: "dynamic skill announcement" },
-      { key: TurnTaskStateKey, label: "task state" },
+      {
+        label: "dynamic skill announcement",
+        historyKey: "availableSkills" as const,
+      },
+      { label: "task state", historyKey: "taskState" as const },
     ].flatMap((context) => [false, true].map((restoredAnchor) => ({ ...context, restoredAnchor }))),
   )(
     "executes the approved tool when $label is injected on the resume step (restored anchor: $restoredAnchor)",
-    async ({ key, restoredAnchor }) => {
+    async ({ historyKey, restoredAnchor }) => {
       const siblingCall = {
         input: { command: "whoami" },
         toolCallId: "call-sibling",
@@ -854,7 +860,7 @@ describe("tool loop generate approval resume (real AI SDK)", () => {
         toolName: "bash",
         type: "tool-result" as const,
       };
-      const session = appendPendingInputBatch({
+      let session = appendPendingInputBatch({
         requests: [pendingApprovalInputRequest],
         // The parked shape when a gated call shares a step with an ungated one.
         responseMessages: [
@@ -864,12 +870,30 @@ describe("tool loop generate approval resume (real AI SDK)", () => {
         session: createBaseSession(),
       });
       const ctx = new ContextContainer();
-      ctx.set(key, "[Runtime context]\nInjected on the resume step.");
+      const runtimeContextAnnouncement =
+        historyKey === "taskState"
+          ? '[Task state]\n{"tasks":[{"name":"analysis","status":"pending","taskId":"analysis"}]}'
+          : "Available skills\n- policy: Tenant policy";
+      if (historyKey === "taskState") {
+        ctx.set(TurnTaskDeliveryKey, "initiating");
+        session = recordSessionTask(session, {
+          createdByTurnId: "turn-1",
+          dispatchContext: { auth: { current: null, initiator: null } },
+          executor: { data: {}, kind: "workflow-tool" },
+          metadata: { kind: "report-probe", name: "analysis" },
+          taskId: "analysis",
+          taskInboxToken: "task-token",
+          taskRunId: "task-run",
+        });
+      } else {
+        ctx.set(PendingSkillAnnouncementKey, runtimeContextAnnouncement);
+      }
       const execute = vi.fn(async () => "/workspace");
       const model = createModel();
+      const runStep = createToolLoopHarness(createConfig(model, execute));
 
       const result = await contextStorage.run(ctx, () =>
-        createToolLoopHarness(createConfig(model, execute))(
+        runStep(
           setHarnessEmissionState(
             restoredAnchor
               ? setTurnClientContextState(session, {
@@ -907,10 +931,21 @@ describe("tool loop generate approval resume (real AI SDK)", () => {
       expect(called).toEqual([toolCall.toolCallId, siblingCall.toolCallId]);
       expect(called.filter((id) => !answered.has(id))).toEqual([]);
       expect(providerPrompt.at(-1)?.role).toBe("tool");
+      expect(ctx.get(HistoryStateKey)).toEqual({});
       expect(result.session.history.at(-1)).toMatchObject({
         content: [{ text: "The command returned /workspace.", type: "text" }],
         role: "assistant",
       });
+
+      const continued = await contextStorage.run(ctx, () =>
+        runStep(result.session, { message: "Continue." }),
+      );
+      expect(
+        continued.session.history.filter(
+          (message) => message.content === runtimeContextAnnouncement,
+        ),
+      ).toHaveLength(1);
+      expect(ctx.get(HistoryStateKey)).toMatchObject({ [historyKey]: runtimeContextAnnouncement });
     },
   );
 
@@ -919,9 +954,9 @@ describe("tool loop generate approval resume (real AI SDK)", () => {
   // restored *after* that intervening exchange. This proves the AI SDK accepts the
   // late-spliced transcript shape before any behavior change lands.
   it("splices the approved batch after an intervening conversation turn", async () => {
-    const interveningHistory: readonly ModelMessage[] = [
-      { content: "Run pwd.", role: "user" },
-      { content: "Any update on that command?", role: "user" },
+    const interveningHistory: readonly HarnessModelMessage[] = [
+      { content: "Run pwd.", kind: "user", role: "user" },
+      { content: "Any update on that command?", kind: "user", role: "user" },
       {
         content: [{ text: "Still waiting for approval to run pwd.", type: "text" }],
         role: "assistant",

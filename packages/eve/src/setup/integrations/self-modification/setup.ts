@@ -1,4 +1,4 @@
-import { confirm, text } from "#setup/ask.js";
+import { confirm, select, text } from "#setup/ask.js";
 import {
   classifySelfModificationConfig,
   connectorName,
@@ -11,13 +11,26 @@ import {
   type SelfModificationSetupValues,
 } from "#self-modification/setup.js";
 import { SELF_MODIFICATION_CONFIG_PATH } from "#self-modification/git-workspace.js";
+import type { VercelProjectReference } from "#setup/project-resolution.js";
+import { ensureConnectionDependencies } from "#setup/scaffold/index.js";
 
 import { describeIntegrationSetupEnvironment } from "../shared/environment.js";
+import { installScaffoldDependencies } from "../shared/scaffold.js";
 import {
   defineSetupIntegration,
   type SetupApplyContext,
   type SetupPrepareContext,
 } from "../types.js";
+
+export interface SelfModificationApplyDependencies {
+  ensureConnectionDependencies: typeof ensureConnectionDependencies;
+  installScaffoldDependencies: typeof installScaffoldDependencies;
+}
+
+const defaultApplyDependencies: SelfModificationApplyDependencies = {
+  ensureConnectionDependencies,
+  installScaffoldDependencies,
+};
 
 type SelfModificationSetupPlan =
   | { readonly kind: "authored" }
@@ -25,6 +38,7 @@ type SelfModificationSetupPlan =
   | {
       readonly kind: "deployed";
       readonly connectorName: string;
+      readonly project: VercelProjectReference;
       readonly values: SelfModificationSetupValues;
     };
 
@@ -36,6 +50,8 @@ export async function prepareSelfModificationSetup(
   context: SetupPrepareContext,
   operations: SelfModificationSetupOperations = defaultSelfModificationSetupOperations(
     context.appRoot,
+    undefined,
+    context.projectRoot,
   ),
 ): Promise<SelfModificationSetupPlan> {
   const existing = await operations.readConfig();
@@ -48,7 +64,35 @@ export async function prepareSelfModificationSetup(
     return { kind: "authored" };
   }
 
-  const detected = await operations.detectGitRepository();
+  const mode = await context.asker.ask(
+    select({
+      key: "self-modification-mode",
+      message: "How should self-modification be enabled?",
+      options: [
+        {
+          id: "deployed",
+          value: "deployed" as const,
+          label: "Enable for deployed",
+          hint: "Let deployed agents propose source changes through draft pull requests",
+        },
+        {
+          id: "local",
+          value: "local" as const,
+          label: "Keep local",
+          hint: "Only enable source editing during local development",
+        },
+      ],
+      recommended: "local" as const,
+      required: true,
+    }),
+  );
+  if (mode === "local") return { kind: "local" };
+
+  const [project, detected, channelNames] = await Promise.all([
+    context.resolveVercelProject("self-modification"),
+    operations.detectGitRepository(),
+    operations.detectChannelNames(),
+  ]);
   const owner = await context.asker.ask(
     text({
       key: "self-modification-repository-owner",
@@ -88,9 +132,11 @@ export async function prepareSelfModificationSetup(
   const name = connectorName(owner, repo);
   const values = {
     branch,
+    channelNames,
     connector: `github/${name}`,
     directory,
     repository: `github.com/${owner}/${repo}`,
+    vercelBackend: true,
   };
   context.presenter.note(
     renderSelfModificationConfig(values),
@@ -108,7 +154,7 @@ export async function prepareSelfModificationSetup(
       required: true,
     }),
   );
-  return confirmed ? { kind: "deployed", connectorName: name, values } : { kind: "local" };
+  return confirmed ? { kind: "deployed", connectorName: name, project, values } : { kind: "local" };
 }
 
 export async function applySelfModificationSetup(
@@ -116,7 +162,10 @@ export async function applySelfModificationSetup(
   context: SetupApplyContext,
   operations: SelfModificationSetupOperations = defaultSelfModificationSetupOperations(
     context.appRoot,
+    undefined,
+    context.projectRoot,
   ),
+  deps: SelfModificationApplyDependencies = defaultApplyDependencies,
 ) {
   if (plan.kind === "authored") {
     return {
@@ -124,15 +173,27 @@ export async function applySelfModificationSetup(
     };
   }
   if (plan.kind === "local") {
-    return { facts: [{ label: "Self-modification", value: "local editing" }] };
+    return { facts: [] };
   }
 
-  const connector = await operations.findOrCreateConnector(plan.connectorName);
-  await operations.attachConnector(connector);
+  const connector = await operations.findOrCreateConnector(plan.connectorName, plan.project);
+  await operations.attachConnector(connector, plan.project);
+  const packageJsonUpdated = await deps.ensureConnectionDependencies({
+    projectRoot: context.appRoot,
+  });
+  await deps.installScaffoldDependencies({
+    changed: packageJsonUpdated.length > 0,
+    log: context.presenter.log,
+    projectPath: context.appRoot,
+    signal: context.signal,
+  });
   await operations.writeConfig(renderSelfModificationConfig({ ...plan.values, connector }));
   context.presenter.log.success(`Updated ${SELF_MODIFICATION_CONFIG_PATH}.`);
   context.presenter.nextSteps([
-    "Install the managed GitHub App for the configured repository, then redeploy.",
+    "Install the managed GitHub App for the configured repository, then deploy or redeploy.",
+    plan.values.vercelBackend
+      ? "After deployment, try self-modification by running `eve dev <deployment-url>` from this linked project. The generated policy admits its Vercel OIDC identity over HTTP; configured channels remain denied until you update `agent/subagents/self-modification/config.ts`."
+      : "Before deployment, configure `deployed.authorize` in `agent/subagents/self-modification/config.ts` to admit a trusted principal for your deployment's channel. After deployment, use that channel to try self-modification.",
   ]);
   return {
     deploymentRequired: true as const,
@@ -149,6 +210,8 @@ export async function prepareLocalSelfModificationSetup(
   context: SetupPrepareContext,
   operations: SelfModificationSetupOperations = defaultSelfModificationSetupOperations(
     context.appRoot,
+    undefined,
+    context.projectRoot,
   ),
 ): Promise<SelfModificationSetupPlan> {
   const existing = await operations.readConfig();

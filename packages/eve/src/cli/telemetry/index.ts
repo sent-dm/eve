@@ -27,6 +27,8 @@ export type EveCliSetupStep =
   | "install_dependencies"
   | "initialize_git"
   | "handoff"
+  | "connection_ready"
+  | "first_response"
   | "model_provider"
   | "model_settings"
   | "registry_channels"
@@ -34,6 +36,23 @@ export type EveCliSetupStep =
   | "registry_review"
   | "registry_install";
 export type EveCliSetupTerminalResult = "completed" | "cancelled" | "error";
+
+/** A bounded, non-sensitive reason for a failed setup terminal event. */
+export type EveCliSetupFailureCode =
+  | "target_resolution"
+  | "target_conflict"
+  | "target_invalid"
+  | "target_filesystem"
+  | "workspace_input"
+  | "scaffolding"
+  | "package_manager_not_found"
+  | "package_manager_start_failed"
+  | "workspace_probe_failed"
+  | "workspace_probe_unrecognized"
+  | "dependency_installation"
+  | "git_initialization"
+  | "handoff"
+  | "onboarding";
 
 export type EveCliSetupStepEvent = {
   flow: EveCliSetupFlow;
@@ -45,6 +64,7 @@ export type EveCliSetupTerminalEvent = {
   flow: EveCliSetupFlow;
   step: EveCliSetupStep;
   result: EveCliSetupTerminalResult;
+  failureCode?: EveCliSetupFailureCode;
 };
 
 export type EveCliTelemetry = {
@@ -67,6 +87,30 @@ async function isEnabled(): Promise<boolean> {
 
 function event(key: string, value: string): EveCliTelemetryEvent {
   return { id: randomUUID(), event_time: Date.now(), key, value };
+}
+
+function setupFailureCode(step: EveCliSetupStep): EveCliSetupFailureCode {
+  switch (step) {
+    case "resolve_target":
+      return "target_resolution";
+    case "scaffold":
+      return "scaffolding";
+    case "install_dependencies":
+    case "registry_install":
+      return "dependency_installation";
+    case "initialize_git":
+      return "git_initialization";
+    case "handoff":
+      return "handoff";
+    case "connection_ready":
+    case "first_response":
+    case "model_provider":
+    case "model_settings":
+    case "registry_channels":
+    case "registry_integrations":
+    case "registry_review":
+      return "onboarding";
+  }
 }
 
 const CLI_TELEMETRY_COMMANDS = new Map<string, string>([
@@ -163,6 +207,11 @@ export function createEveCliTelemetry(version: string): EveCliTelemetry {
         event("setup_terminal_step", input.step),
         event("setup_terminal_result", input.result),
       );
+      if (input.result === "error") {
+        setupEvents.push(
+          event("setup_failure_code", input.failureCode ?? setupFailureCode(input.step)),
+        );
+      }
     },
     trackOutcome(outcome) {
       if (activeSetup !== undefined && !setupTerminalRecorded) {

@@ -4,7 +4,6 @@ import { ActivityObserverKey } from "#context/keys.js";
 import type { FrameworkContextProvider } from "#context/provider.js";
 import { runStep } from "#context/run-step.js";
 import { buildCallbackContext } from "#context/build-callback-context.js";
-import { serializeContext } from "#context/serialize.js";
 import { isAuthorizationSignal } from "#harness/authorization.js";
 import { activeTurnId } from "#harness/active-turn-id.js";
 import { getHarnessEmissionState } from "#harness/emission.js";
@@ -19,12 +18,14 @@ import {
 import { deriveBackgroundTaskActivityObserver } from "#execution/activity-work.js";
 import { isAsyncIterable } from "#shared/async-iterable.js";
 import { parseJsonValue } from "#shared/json.js";
+import { projectToolStartLabel } from "#harness/action-presentation.js";
 import type { ToolExecuteOptions } from "#tools/definition.js";
 import { createTaskMessage, isTaskMessage, type TaskExec } from "#tools/task.js";
 import { findSessionTaskEntry, recordSessionTask } from "#tasks/session-index.js";
 import type { AgentView } from "#subagents/handles/prompt.js";
 import {
   beginBackgroundTask,
+  createTaskAgentDispatchContext,
   prepareBackgroundTask,
   rejectDelegatedDispatch,
   type BackgroundTask,
@@ -36,7 +37,7 @@ import {
   startTaskRun,
   waitForTaskCommandOwner,
 } from "#execution/tasks/parent/run-parent.js";
-import { sessionCommandHookToken } from "#execution/session-command-token.js";
+import { sessionCommandHookToken } from "#execution/session-inbox/address.js";
 import { projectSubagentTask } from "#execution/tasks/parent/subagent-task-projection.js";
 import { deriveAgentOperationId } from "#subagents/handles/operation-id.js";
 import { AGENT_BUSY, AGENT_MISMATCH, AGENT_UNREACHABLE } from "#subagents/agent-handle-errors.js";
@@ -48,12 +49,12 @@ import {
   type AgentHandleStoreCommandResult,
 } from "#subagents/handles/store.js";
 import { applyTaskAgentHandleCommand } from "#subagents/handles/transitions.js";
-import { cancelOwnedTask } from "#execution/tasks/parent/dispatch.js";
-import { cancelBackgroundAgentTask } from "#execution/tools/subagent/task-cancel.js";
+import { steerBackgroundAgent } from "#execution/tools/subagent/steer.js";
 
 const IN_PROCESS_WORKFLOW_EXECUTOR = { data: {}, kind: "workflow-task" } as const;
 
 interface BackgroundToolExecutionRecord {
+  readonly callId: string;
   claim?: {
     readonly operationId: string;
     readonly taskId: string;
@@ -138,7 +139,6 @@ export function readRetainedBackgroundToolResult(
 class BackgroundToolExecutionScope implements BackgroundToolExecutor {
   private readonly executions = new Map<string, Promise<unknown>>();
   private readonly records: BackgroundToolExecutionRecord[] = [];
-  private readonly steeringAgents = new Set<string>();
   private agentHandleSession: HarnessSession;
   private agentHandlesChanged = false;
   private retained = false;
@@ -194,6 +194,10 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     });
   }
 
+  hasPendingTasks(): boolean {
+    return this.records.some((record) => record.settled && record.task !== undefined);
+  }
+
   async commit(session: HarnessSession): Promise<HarnessSession> {
     const incomplete = this.records.filter((record) => !record.settled);
     if (incomplete.length > 0) {
@@ -247,16 +251,21 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
 
   private resultFields(): BackgroundToolStepResult | undefined {
     const tasks = this.records.flatMap((record) =>
-      record.settled && record.task !== undefined ? [record.task] : [],
+      record.settled && record.task !== undefined
+        ? [
+            {
+              callId: record.callId,
+              taskInboxToken: record.task.taskInboxToken,
+              taskId: record.task.taskId,
+              taskRunId: record.task.taskRunId,
+            },
+          ]
+        : [],
     );
     if (tasks.length === 0 && !this.agentHandlesChanged) return undefined;
     return {
       backgroundTaskSession: this.apply(this.initialSession),
-      backgroundTasks: tasks.map(({ taskInboxToken, taskId, taskRunId }) => ({
-        taskInboxToken,
-        taskId,
-        taskRunId,
-      })),
+      backgroundTasks: tasks,
     };
   }
 
@@ -266,11 +275,18 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     readonly options: ToolExecuteOptions;
     readonly toolInput: unknown;
   }): Promise<unknown> {
-    const record: BackgroundToolExecutionRecord = { settled: false };
+    const record: BackgroundToolExecutionRecord = {
+      callId: input.options.toolCallId,
+      settled: false,
+    };
     this.records.push(record);
     const emission = getHarnessEmissionState(this.initialSession.state);
     const ctx = loadContext();
     const started = await this.startTask({ ctx, emission, input, record });
+    if (started.kind === "steered") {
+      record.settled = true;
+      return started.receipt;
+    }
     const task = started.task;
     record.task = task;
 
@@ -317,7 +333,21 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       readonly toolInput: unknown;
     };
     readonly record: BackgroundToolExecutionRecord;
-  }): Promise<{ readonly receipt?: { readonly agentId: string }; readonly task: BackgroundTask }> {
+  }): Promise<
+    | {
+        readonly kind: "started";
+        readonly receipt?: { readonly agentId: string };
+        readonly task: BackgroundTask;
+      }
+    | {
+        readonly kind: "steered";
+        readonly receipt: {
+          readonly agentId: string;
+          readonly taskId: string;
+          readonly status: "working";
+        };
+      }
+  > {
     const workflow =
       input.input.definition.workflowId === undefined
         ? undefined
@@ -367,16 +397,20 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       kind: "tool" as const,
       name: input.input.definition.name,
     };
+    const activityLabel = projectToolStartLabel(input.input.definition, input.input.toolInput);
+    const callbackSession = buildCallbackContext().session;
     const taskInput = {
       activityObserver: deriveBackgroundTaskActivityObserver({
         activityObserver: input.ctx.get(ActivityObserverKey),
         callId: input.input.options.toolCallId,
+        label: activityLabel,
         name: metadata.name,
         parentSessionId: this.initialSession.sessionId,
         parentTurnId,
         rootSessionId: this.initialSession.rootSessionId ?? this.initialSession.sessionId,
       }),
       callId: input.input.options.toolCallId,
+      dispatchContext: createTaskAgentDispatchContext(input.ctx, callbackSession.auth),
       metadata,
       parentSessionId: this.initialSession.sessionId,
       parentStepIndex: input.emission.stepIndex,
@@ -385,9 +419,11 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     };
     if (workflow === undefined) {
       return {
+        kind: "started",
         task: await beginBackgroundTask({
           activityObserver: taskInput.activityObserver,
           callId: taskInput.callId,
+          dispatchContext: taskInput.dispatchContext,
           metadata: taskInput.metadata,
           parentSessionId: taskInput.parentSessionId,
           parentStepIndex: taskInput.parentStepIndex,
@@ -400,7 +436,11 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       throw new Error(`Background workflow tool "${input.input.definition.name}" has no input.`);
     }
 
-    const task = prepareBackgroundTask(taskInput);
+    const task: Omit<BackgroundTask, "taskRunId"> = {
+      ...prepareBackgroundTask(taskInput),
+      activityWorkIdentity:
+        workflow.resultKind === "subagent" ? taskInput.activityObserver?.workIdentity : undefined,
+    };
     if (
       workflow.resultKind === "subagent" &&
       subagentProjection !== undefined &&
@@ -432,18 +472,37 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
         parentSessionId: taskInput.parentSessionId,
         parentTurnId,
       });
-      const claim = await this.claimAgentForSteering(
-        {
-          agentId: subagentProjection.metadata.agentId,
-          callId: taskInput.callId,
-          expectedTarget: subagentProjection.metadata.mode,
-          invokedName: subagentProjection.metadata.name,
-          kind: "claim",
-          operationId,
-          ownerId: task.taskId,
-        },
-        input.ctx,
-      );
+      const claim = this.applyAgentHandleCommand({
+        agentId: subagentProjection.metadata.agentId,
+        callId: taskInput.callId,
+        expectedTarget: subagentProjection.metadata.mode,
+        invokedName: subagentProjection.metadata.name,
+        kind: "claim",
+        operationId,
+        ownerId: task.taskId,
+      });
+      if (claim.kind === "busy" && claim.handle.phase === "claimed") {
+        const handle = claim.handle;
+        const entry = findSessionTaskEntry(this.agentHandleSession.state, handle.ownerId);
+        if (
+          entry?.metadata.kind === "subagent" &&
+          entry.metadata.agentId === handle.identity.id &&
+          entry.metadata.name === handle.identity.name &&
+          entry.terminalView === undefined
+        ) {
+          await steerBackgroundAgent({
+            ctx: input.ctx,
+            handle,
+            callId: taskInput.callId,
+            input: workflowInput,
+            session: this.agentHandleSession,
+          });
+          return {
+            kind: "steered",
+            receipt: { agentId: handle.identity.id, taskId: entry.taskId, status: "working" },
+          };
+        }
+      }
       if (!readClaimedHandle(claim)) {
         throwAgentClaimError(subagentProjection.metadata.agentId, claim);
       } else {
@@ -463,7 +522,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
         executeInput: workflow.executeInput?.(workflowInput),
         input: workflowInput,
         resultKind: workflow.resultKind,
-        session: buildCallbackContext().session,
+        session: callbackSession,
         stepIndex: input.emission.stepIndex,
         toolName: input.input.definition.name,
         taskId: task.taskId,
@@ -478,52 +537,13 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     };
     input.record.task = backgroundTask;
     if (workflow.resultKind !== "subagent") {
-      return { task: backgroundTask };
+      return { kind: "started", task: backgroundTask };
     }
 
     if (subagentProjection === undefined) {
-      return { task: backgroundTask };
+      return { kind: "started", task: backgroundTask };
     }
-    if (subagentProjection.identity === undefined) {
-      return { receipt: subagentProjection.receipt, task: backgroundTask };
-    }
-    return { receipt: subagentProjection.receipt, task: backgroundTask };
-  }
-
-  private async claimAgentForSteering(
-    command: Extract<AgentHandleStoreCommand, { kind: "claim" }>,
-    ctx: ReturnType<typeof loadContext>,
-  ): Promise<AgentHandleStoreCommandResult> {
-    const claim = this.applyAgentHandleCommand(command);
-    if (claim.kind !== "busy" || claim.handle.phase !== "claimed") return claim;
-
-    const handle = claim.handle;
-    if (this.steeringAgents.has(handle.identity.id)) return claim;
-
-    const entry = findSessionTaskEntry(this.agentHandleSession.state, handle.ownerId);
-    if (
-      entry?.metadata.kind !== "subagent" ||
-      entry.metadata.agentId !== handle.identity.id ||
-      entry.metadata.name !== handle.identity.name
-    ) {
-      return claim;
-    }
-
-    this.steeringAgents.add(handle.identity.id);
-    try {
-      await cancelOwnedTask({
-        cancelOwnedWork: cancelBackgroundAgentTask,
-        entry,
-        serializedContext: serializeContext(ctx),
-        session: this.agentHandleSession,
-      });
-      // Other calls in this batch may have changed the store while cancellation
-      // was pending. Release only the old owner, then claim the current handle.
-      this.applyAgentHandleCommand({ kind: "release-owner", ownerId: handle.ownerId });
-      return this.applyAgentHandleCommand(command);
-    } finally {
-      this.steeringAgents.delete(handle.identity.id);
-    }
+    return { kind: "started", receipt: subagentProjection.receipt, task: backgroundTask };
   }
 
   private applyAgentHandleCommand(command: AgentHandleStoreCommand): AgentHandleStoreCommandResult {

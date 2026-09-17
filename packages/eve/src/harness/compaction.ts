@@ -7,9 +7,9 @@ import {
   createCompactionPrompt,
   sliceUtf16Safe,
   stubContentOutputFileParts,
-  TODO_COMPACTION_PRESERVATION_LABEL,
   TRANSCRIPT_PAYLOAD_LIMIT,
 } from "#harness/compaction-prompt.js";
+import { createFrameworkUserMessage, isFrameworkUserMessage } from "#harness/messages.js";
 import { estimateTokens } from "#harness/token-estimate.js";
 import type { RuntimeModelReference } from "#runtime/agent/bootstrap.js";
 import type { CompactionConfig, ToolLoopHarnessConfig } from "#harness/types.js";
@@ -26,7 +26,7 @@ type ModelMessageContentPart = Exclude<ModelMessage["content"], string>[number];
 // itself never grows past threshold + envelope + checkpoint.
 const COMPACTION_PROMPT_OVERHEAD_TOKENS = estimateTokens([
   { content: COMPACTION_PROMPT_ENVELOPE.system, role: "system" },
-  { content: COMPACTION_PROMPT_ENVELOPE.prompt, role: "user" },
+  createFrameworkUserMessage("context.compaction", COMPACTION_PROMPT_ENVELOPE.prompt),
 ] satisfies ModelMessage[]);
 
 /**
@@ -135,12 +135,13 @@ function toolResultCapHeuristic(input: CompactionHeuristicInput): CompactionHeur
     input.previousCheckpoint === undefined
       ? []
       : [
-          { content: COMPACTION_CHECKPOINT_MARKER, role: "user" },
+          createFrameworkUserMessage("context.compaction", COMPACTION_CHECKPOINT_MARKER),
           { content: input.previousCheckpoint, role: "assistant" },
         ];
   const capped = withResumptionGuard(
     [...checkpointHead, ...capToolResults(input.older), ...input.recent],
     input.conversation,
+    input.config.threshold,
   );
 
   // Evaluate on the same ruler shouldCompact uses (envelope included):
@@ -238,8 +239,8 @@ export async function compactMessages(
     const result = await generateText({
       abortSignal,
       headers,
+      messages: [createFrameworkUserMessage("context.compaction", summaryPrompt.prompt)],
       model,
-      prompt: summaryPrompt.prompt,
       providerOptions,
       system: summaryPrompt.system,
       telemetry: telemetry ? { ...telemetry, functionId: "eve.compaction" } : undefined,
@@ -253,14 +254,18 @@ export async function compactMessages(
     }
 
     const summaryHead: ModelMessage[] = [
-      { content: COMPACTION_CHECKPOINT_MARKER, role: "user" },
+      createFrameworkUserMessage("context.compaction", COMPACTION_CHECKPOINT_MARKER),
       { content: result.text, role: "assistant" },
     ];
 
     // Prefer keeping the recent tail verbatim — surviving tool results are the
     // model's evidence that work already ran. Degrade to text-only, then to a
     // smaller window, only under threshold pressure.
-    const verbatim = withResumptionGuard([...summaryHead, ...recent], conversation);
+    const verbatim = withResumptionGuard(
+      [...summaryHead, ...recent],
+      conversation,
+      config.threshold,
+    );
     if (evaluateThreshold(verbatim, config, "estimate").type === "within-limit") {
       return verbatim;
     }
@@ -268,6 +273,7 @@ export async function compactMessages(
     const stripped = withResumptionGuard(
       [...summaryHead, ...keepNonToolResultMessages(recent)],
       conversation,
+      config.threshold,
     );
     if (evaluateThreshold(stripped, config, "estimate").type === "within-limit" || keep === 0) {
       return stripped;
@@ -329,7 +335,7 @@ function capToolResults(messages: readonly ModelMessage[]): ModelMessage[] {
 /**
  * Providers that don't support assistant prefill reject a request that ends on
  * assistant content, so compaction must resume from a user turn. Rather than
- * a contentless synthetic prompt, replay the conversation's last real user
+ * a contentless framework prompt, replay the conversation's last real user
  * message when compaction folded it away — the model resumes against its
  * actual instruction, with the checkpoint as background. Falls back to
  * "Continue." when the last real user message still survives in the kept
@@ -338,29 +344,38 @@ function capToolResults(messages: readonly ModelMessage[]): ModelMessage[] {
 function withResumptionGuard(
   messages: ModelMessage[],
   conversation: readonly ModelMessage[],
+  threshold: number,
 ): ModelMessage[] {
   const lastRole = messages.at(-1)?.role;
-  if (lastRole !== undefined && lastRole !== "assistant") {
-    return messages;
-  }
-
   const replay = findLastRealUserMessage(conversation);
   const alreadyKept =
     replay !== undefined &&
     messages.some((message) => message.role === "user" && message.content === replay.content);
 
+  if (lastRole !== undefined && lastRole !== "assistant") {
+    // A retained tool tail must not displace a task that can fit in the budget.
+    // Including it here lets tail selection make room before accepting a candidate.
+    if (
+      lastRole === "tool" &&
+      replay !== undefined &&
+      !alreadyKept &&
+      estimateTokens([replay]) <= threshold
+    ) {
+      return [...messages, replay];
+    }
+    return messages;
+  }
+
   return [
     ...messages,
     replay !== undefined && !alreadyKept
       ? replay
-      : { content: COMPACTION_RESUMPTION_MESSAGE, role: "user" },
+      : createFrameworkUserMessage("execution.continuation", COMPACTION_RESUMPTION_MESSAGE),
   ];
 }
 
 /**
- * Latest user message authored by the user rather than synthesized by the
- * framework (resumption prompts, checkpoint markers, and todo preservation
- * messages are all `role: "user"` but carry no user intent).
+ * Latest user message authored by the user rather than the framework.
  */
 function findLastRealUserMessage(conversation: readonly ModelMessage[]): ModelMessage | undefined {
   for (let index = conversation.length - 1; index >= 0; index -= 1) {
@@ -368,11 +383,7 @@ function findLastRealUserMessage(conversation: readonly ModelMessage[]): ModelMe
     if (message?.role !== "user" || typeof message.content !== "string") {
       continue;
     }
-    if (
-      message.content === COMPACTION_RESUMPTION_MESSAGE ||
-      message.content === COMPACTION_CHECKPOINT_MARKER ||
-      message.content.startsWith(TODO_COMPACTION_PRESERVATION_LABEL)
-    ) {
+    if (isFrameworkUserMessage(message)) {
       continue;
     }
     return message;

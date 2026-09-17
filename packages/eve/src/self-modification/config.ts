@@ -1,4 +1,38 @@
+import type { SessionAuthContext } from "#channel/types.js";
+
 import { assertGitRef, assertRepositoryPart } from "./identifiers.js";
+
+/** Principal and channel that requested a deployed source modification. */
+export interface SelfModificationAuthorizationContext {
+  readonly channel: {
+    /** Channel adapter family, such as `"slack"` or `"http"`. */
+    readonly kind?: string;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+  };
+  readonly principal: SessionAuthContext | null;
+}
+
+/** Decides whether a principal may use deployed self-modification. */
+export type SelfModificationAuthorization = (
+  context: SelfModificationAuthorizationContext,
+) => boolean | Promise<boolean>;
+
+export interface GitHubRepository {
+  readonly owner: string;
+  readonly repo: string;
+}
+
+export type GitHubCredentialCapability = "checkout" | "publish";
+
+export interface GitHubCredentialRequest {
+  readonly capability: GitHubCredentialCapability;
+  readonly repository: GitHubRepository;
+}
+
+/** Application-supplied GitHub credentials for deployed self-modification. */
+export interface GitHubCredentialProvider {
+  resolve(request: GitHubCredentialRequest): Promise<string>;
+}
 
 export interface SelfModificationConfig {
   readonly local?: { readonly enabled?: boolean };
@@ -12,15 +46,17 @@ export interface SelfModificationConfig {
       };
     };
     readonly target: { readonly branch: string };
-    readonly credentials?: {
-      /** Ephemeral, repository-scoped GitHub App credentials from Vercel Connect. */
-      readonly vercelConnect?: { readonly connector: string };
-      /**
-       * Self-hosted exception. Reads `EVE_SELF_MODIFICATION_GITHUB_TOKEN` from
-       * the trusted deployment environment; never injects it into the sandbox.
-       */
-      readonly pat?: true;
-    };
+    /** Fail-closed policy for principals that may create draft proposals. */
+    readonly authorize: SelfModificationAuthorization;
+    readonly credentials?:
+      | GitHubCredentialProvider
+      | {
+          /**
+           * Self-hosted exception. Reads `EVE_SELF_MODIFICATION_GITHUB_TOKEN` from
+           * the trusted deployment environment; never injects it into the sandbox.
+           */
+          readonly pat: true;
+        };
   };
 }
 
@@ -30,6 +66,7 @@ export interface ResolvedSelfModificationConfig {
 }
 
 export interface ResolvedDeployedSelfModificationConfig {
+  readonly authorize: SelfModificationAuthorization;
   readonly credentials: ResolvedGitHubCredentials;
   readonly directory: string;
   readonly repository: GitHubRepository;
@@ -38,12 +75,7 @@ export interface ResolvedDeployedSelfModificationConfig {
 
 export type ResolvedGitHubCredentials =
   | { readonly kind: "pat" }
-  | { readonly connector: string; readonly kind: "vercel-connect" };
-
-export interface GitHubRepository {
-  readonly owner: string;
-  readonly repo: string;
-}
+  | { readonly kind: "provider"; readonly provider: GitHubCredentialProvider };
 
 /** Defines the policy shared by the self-modification agent, sandbox, and extension. */
 export function defineSelfModificationConfig(
@@ -70,15 +102,20 @@ export function resolveSelfModificationConfig(
   const deployed = config.deployed;
   if (deployed === undefined) return { localEnabled };
   if (!isRecord(deployed)) throw new Error("Self-modification deployed must be an object.");
-  const { source, target, credentials } = deployed;
-  if (source === undefined || target === undefined) {
-    throw new Error("Self-modification deployed requires both source and target configuration.");
+  const { source, target, authorize, credentials } = deployed;
+  if (source === undefined || target === undefined || authorize === undefined) {
+    throw new Error(
+      "Self-modification deployed requires source, target, and authorization configuration.",
+    );
   }
   if (!isRecord(source)) throw new Error("Self-modification deployed.source must be an object.");
   if (!isRecord(source.git)) {
     throw new Error("Self-modification deployed.source.git must be an object.");
   }
   if (!isRecord(target)) throw new Error("Self-modification deployed.target must be an object.");
+  if (typeof authorize !== "function") {
+    throw new Error("Self-modification deployed.authorize must be a function.");
+  }
 
   const { git } = source;
   if (typeof git.repository !== "string" || typeof git.directory !== "string") {
@@ -91,6 +128,7 @@ export function resolveSelfModificationConfig(
   }
   return {
     deployed: {
+      authorize: authorize as SelfModificationAuthorization,
       credentials: parseCredentials(credentials),
       directory: parseDirectory(git.directory),
       repository: parseGitHubRepository(git.repository),
@@ -103,32 +141,32 @@ export function resolveSelfModificationConfig(
 function parseCredentials(value: unknown): ResolvedGitHubCredentials {
   if (!isRecord(value)) {
     throw new Error(
-      "Self-modification deployed.credentials must explicitly configure Vercel Connect or the self-hosted PAT exception.",
+      "Self-modification deployed.credentials must explicitly configure a credential provider or the self-hosted PAT exception.",
     );
   }
-  const hasConnect = value.vercelConnect !== undefined;
+  const hasProvider = value.resolve !== undefined;
   const hasPat = value.pat !== undefined;
-  if (hasConnect === hasPat) {
+  if (hasProvider && hasPat) {
     throw new Error(
-      "Self-modification deployed.credentials must configure exactly one of vercelConnect or pat.",
+      "Self-modification deployed.credentials must configure either a credential provider or pat, not both.",
     );
   }
-  if (value.pat !== undefined) {
+  if (hasPat) {
     if (value.pat !== true) {
       throw new Error("Self-modification deployed.credentials.pat must be true.");
     }
     return { kind: "pat" };
   }
-  if (!isRecord(value.vercelConnect)) {
-    throw new Error("Self-modification deployed.credentials.vercelConnect must be an object.");
-  }
-  const connector = value.vercelConnect.connector;
-  if (typeof connector !== "string" || connector.trim().length === 0) {
+  if (!isGitHubCredentialProvider(value)) {
     throw new Error(
-      "Self-modification deployed.credentials.vercelConnect.connector must be a string.",
+      "Self-modification deployed.credentials must be an object with a resolve function.",
     );
   }
-  return { connector: connector.trim(), kind: "vercel-connect" };
+  return { kind: "provider", provider: value };
+}
+
+function isGitHubCredentialProvider(value: unknown): value is GitHubCredentialProvider {
+  return isRecord(value) && typeof value.resolve === "function";
 }
 
 function parseGitHubRepository(repository: string): GitHubRepository {

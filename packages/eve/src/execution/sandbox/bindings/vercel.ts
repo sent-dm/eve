@@ -51,6 +51,7 @@ import {
 } from "#execution/sandbox/bindings/vercel-errors.js";
 import { getNamedVercelSandbox } from "#execution/sandbox/bindings/vercel-lookup.js";
 import {
+  deleteUnusableVercelSandbox,
   deleteVercelSandbox,
   stopVercelSandbox,
 } from "#execution/sandbox/bindings/vercel-lifecycle.js";
@@ -58,7 +59,6 @@ import { normalizeVercelReadStream } from "#execution/sandbox/bindings/vercel-re
 import { resolveSandboxModelPath } from "#shared/skill-paths.js";
 import type {
   VercelCreateOptions,
-  VercelDeleteModule,
   VercelModule,
   VercelSandbox,
 } from "#execution/sandbox/bindings/vercel-sdk-types.js";
@@ -66,7 +66,6 @@ import type {
 export interface CreateVercelSandboxInput {
   readonly createSandbox?: CreateVercelSandbox;
   readonly createOptions?: VercelCreateOptions;
-  readonly loadDeleteSandboxModule?: () => Promise<VercelDeleteModule>;
   readonly loadSandboxModule?: () => Promise<VercelModule>;
   readonly resolveSessionCreateOptions?: (
     context: VercelSandboxSessionCreateContext,
@@ -84,11 +83,7 @@ export function createVercelSandbox(
   input: CreateVercelSandboxInput = {},
 ): SandboxBackend<VercelSandboxBootstrapUseOptions, VercelSandboxSessionUseOptions> {
   const loadSandboxModule =
-    input.loadSandboxModule ??
-    (async () => await import("#compiled/@vercel/sandbox-drives/index.js"));
-  const loadDeleteSandboxModule =
-    input.loadDeleteSandboxModule ??
-    (async () => await import("#compiled/@vercel/sandbox/index.js"));
+    input.loadSandboxModule ?? (async () => await import("#compiled/@vercel/sandbox/index.js"));
   const createOptions: VercelCreateOptions = {
     timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
     ...input.createOptions,
@@ -116,24 +111,22 @@ export function createVercelSandbox(
             });
 
       const sandboxModule = await loadSandboxModule();
+      const ensureSessionInput: EnsureSessionInput = {
+        createOptions,
+        createSandbox,
+        existingMetadata: createInput.existingMetadata,
+        resolveSessionCreateOptions: input.resolveSessionCreateOptions,
+        sandboxModule,
+        sessionId: createInput.tags?.sessionId ?? createInput.sessionKey,
+        sessionKey: createInput.sessionKey,
+        snapshotId: template?.snapshotId,
+        tags,
+      };
       let session: VercelSandboxSessionCreateResult;
       try {
-        session = await ensureSession({
-          createOptions,
-          createSandbox,
-          existingMetadata: createInput.existingMetadata,
-          resolveSessionCreateOptions: input.resolveSessionCreateOptions,
-          sandboxModule,
-          sessionId: createInput.tags?.sessionId ?? createInput.sessionKey,
-          sessionKey: createInput.sessionKey,
-          snapshotId: template?.snapshotId,
-          tags,
-        });
+        session = await ensureSession(ensureSessionInput);
       } catch (error) {
-        if (
-          template !== null &&
-          (isVercelSnapshotUnavailableError(error) || isVercelSandboxMissingError(error))
-        ) {
+        if (template !== null && isVercelSnapshotUnavailableError(error)) {
           prewarmedTemplates.delete(template.templateKey);
           const staleTemplate = await getNamedVercelSandbox({
             createOptions,
@@ -152,15 +145,25 @@ export function createVercelSandbox(
         );
       }
 
-      await ensureVercelSandboxBaseRuntime(session.sandbox);
-      if (template === null && session.created) {
-        await applyInitialVercelNetworkPolicy(session.sandbox, createOptions.networkPolicy);
+      try {
+        session = await ensureUsableSession({
+          input: ensureSessionInput,
+          session,
+        });
+        if (template === null && session.created) {
+          await applyInitialVercelNetworkPolicy(session.sandbox, createOptions.networkPolicy);
+        }
+      } catch (error) {
+        throw new Error(
+          `Failed to initialize sandbox session "${createInput.sessionKey}": ${errorMessage(error)}`,
+          { cause: error },
+        );
       }
 
       return createHandle({
         createOptions,
-        loadDeleteSandboxModule,
         sandbox: session.sandbox,
+        sandboxModule,
         sessionKey: createInput.sessionKey,
       });
     },
@@ -306,7 +309,7 @@ async function ensureTemplate(input: EnsureTemplateInput): Promise<EnsureTemplat
       createOptions: withBaseSetupNetworkPolicy({
         ...input.createOptions,
         name: input.templateKey,
-        persistent: false,
+        persistent: true,
         tags: tags,
       }),
     });
@@ -398,6 +401,29 @@ interface VercelSandboxSessionCreateResult {
   readonly sandbox: VercelSandbox;
 }
 
+async function ensureUsableSession(input: {
+  readonly input: EnsureSessionInput;
+  readonly session: VercelSandboxSessionCreateResult;
+}): Promise<VercelSandboxSessionCreateResult> {
+  try {
+    await ensureVercelSandboxBaseRuntime(input.session.sandbox);
+    return input.session;
+  } catch (error) {
+    if (input.session.created || !isVercelSnapshotUnavailableError(error)) {
+      throw error;
+    }
+  }
+
+  await deleteUnusableVercelSandbox({
+    createOptions: input.input.createOptions,
+    sandbox: input.session.sandbox,
+    sandboxModule: input.input.sandboxModule,
+  });
+  const replacement = await ensureSession({ ...input.input, existingMetadata: undefined });
+  await ensureVercelSandboxBaseRuntime(replacement.sandbox);
+  return replacement;
+}
+
 async function ensureSession(input: EnsureSessionInput): Promise<VercelSandboxSessionCreateResult> {
   const sandboxName = getVercelSandboxName(input.existingMetadata) ?? input.sessionKey;
   const existing = await getNamedVercelSandbox({
@@ -466,8 +492,8 @@ function createSessionCreateParams(
 
 function createHandle(input: {
   readonly createOptions: VercelCreateOptions;
-  readonly loadDeleteSandboxModule: () => Promise<VercelDeleteModule>;
   readonly sandbox: VercelSandbox;
+  readonly sandboxModule: VercelModule;
   readonly sessionKey: string;
 }): SandboxBackendHandle<VercelSandboxSessionUseOptions> {
   const { sandbox, sessionKey } = input;
@@ -495,8 +521,8 @@ function createHandle(input: {
     async delete(options) {
       await deleteVercelSandbox({
         createOptions: input.createOptions,
-        loadDeleteSandboxModule: input.loadDeleteSandboxModule,
         sandbox,
+        sandboxModule: input.sandboxModule,
         signal: options?.abortSignal,
       });
     },

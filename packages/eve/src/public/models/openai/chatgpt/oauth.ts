@@ -11,12 +11,15 @@ export const CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CHATGPT_LOGIN_HINT =
   "Open `/model` in `eve dev` and select ChatGPT subscription to sign in.";
 
-export interface ChatGptCredentials {
-  readonly accessToken: string;
+export interface ChatGptRefreshCredentials {
   readonly refreshToken: string;
-  readonly expiresAt: number;
   readonly accountId?: string;
   readonly accountLabel?: string;
+}
+
+export interface ChatGptCredentials extends ChatGptRefreshCredentials {
+  readonly accessToken: string;
+  readonly expiresAt: number;
 }
 
 export class ChatGptSignInRequiredError extends Error {
@@ -30,7 +33,7 @@ export async function requestChatGptTokens(
   options: {
     fetch?: typeof fetch;
     signal?: AbortSignal;
-    previous?: ChatGptCredentials;
+    previous?: ChatGptRefreshCredentials;
     now?: () => number;
   } = {},
 ): Promise<ChatGptCredentials> {
@@ -56,7 +59,7 @@ export async function requestChatGptTokens(
       throw new ChatGptSignInRequiredError();
     }
     throw new Error(
-      `ChatGPT authentication failed (HTTP ${response.status}). Retry sign-in from /model.`,
+      `ChatGPT authentication failed (HTTP ${response.status}). Retry sign-in from /login.`,
     );
   }
   const value = await readChatGptAuthResponse(response);
@@ -68,7 +71,7 @@ export async function requestChatGptTokens(
       : options.previous?.refreshToken;
   if (!accessToken || !refreshToken || !isObject(value)) {
     throw new Error(
-      "ChatGPT authentication did not return a usable session. Retry sign-in from /model.",
+      "ChatGPT authentication did not return a usable session. Retry sign-in from /login.",
     );
   }
   const idToken = typeof value.id_token === "string" ? value.id_token : undefined;
@@ -89,7 +92,7 @@ export async function requestChatGptTokens(
       : (readCodexJwtExpirationMs(accessToken) ?? now + 3600_000);
   if (!Number.isFinite(expiresAt) || expiresAt <= now) {
     throw new Error(
-      "ChatGPT authentication returned an expired session. Retry sign-in from /model.",
+      "ChatGPT authentication returned an expired session. Retry sign-in from /login.",
     );
   }
   return {
@@ -104,7 +107,7 @@ export async function requestChatGptTokens(
 export async function readChatGptAuthResponse(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader)
-    throw new Error("ChatGPT authentication returned an empty response. Retry from /model.");
+    throw new Error("ChatGPT authentication returned an empty response. Retry from /login.");
   try {
     const chunks: Uint8Array[] = [];
     let bytes = 0;
@@ -118,7 +121,7 @@ export async function readChatGptAuthResponse(response: Response): Promise<unkno
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     await reader.cancel().catch(() => {});
-    throw new Error("ChatGPT authentication returned an invalid response. Retry from /model.");
+    throw new Error("ChatGPT authentication returned an invalid response. Retry from /login.");
   } finally {
     reader.releaseLock();
   }

@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, it } from "vitest";
 
+import { renderSelfModificationConfig } from "./setup.js";
+
 const runFile = promisify(execFile);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const temporaryRoots: string[] = [];
@@ -98,7 +100,7 @@ describe("packed package consumption", () => {
           type: "module",
           scripts: { build: "eve build" },
           dependencies: {
-            "@vercel/connect": "1.0.0",
+            "@vercel/connect": "2.2.0",
             eve: `file:${eveTarball}`,
             "just-bash": "3.1.0",
           },
@@ -121,7 +123,14 @@ describe("packed package consumption", () => {
     await writeAppFile(
       appRoot,
       "agent/subagents/self-modification/config.ts",
-      'import { defineSelfModificationConfig } from "eve/self-modification/config";\n\nexport default defineSelfModificationConfig({ deployed: { source: { git: { directory: ".", repository: "github.com/acme/agent" } }, target: { branch: "main" }, credentials: { vercelConnect: { connector: "github/selfmod-acme-agent" } } } });\n',
+      renderSelfModificationConfig({
+        branch: "main",
+        channelNames: [],
+        connector: "github/selfmod-acme-agent",
+        directory: ".",
+        repository: "github.com/acme/agent",
+        vercelBackend: true,
+      }),
     );
     await writeAppFile(
       appRoot,
@@ -141,13 +150,7 @@ describe("packed package consumption", () => {
 
     await run(
       "pnpm",
-      [
-        "install",
-        "--ignore-scripts",
-        "--no-frozen-lockfile",
-        "--prefer-offline",
-        "--config.minimum-release-age=0",
-      ],
+      ["install", "--ignore-scripts", "--no-frozen-lockfile", "--prefer-offline"],
       appRoot,
     );
     await access(join(appRoot, "node_modules/eve/dist/src/self-modification/agent.js"));

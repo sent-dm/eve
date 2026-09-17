@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cancelOwnedTask, executeTaskControlAction } from "#execution/tasks/parent/dispatch.js";
+import { cancelOwnedTask, isTaskControlAction } from "#execution/tasks/parent/dispatch.js";
 import { readLatestTaskView, sendTaskCommand } from "#execution/tasks/parent/run-parent.js";
 import { cancelWorkflowToolRun } from "#execution/tools/workflow/cancel.js";
-import { resumeSessionInbox } from "#execution/wire/session-inbox-resume.js";
+import { resumeSessionInbox } from "#execution/session-inbox/resume.js";
 
 const { cancelRun, getRun } = vi.hoisted(() => ({
   cancelRun: vi.fn(),
@@ -15,7 +15,7 @@ vi.mock("#execution/tasks/parent/run-parent.js", () => ({
   sendTaskCommand: vi.fn(),
 }));
 vi.mock("#execution/tools/workflow/cancel.js", () => ({ cancelWorkflowToolRun: vi.fn() }));
-vi.mock("#execution/wire/session-inbox-resume.js", () => ({ resumeSessionInbox: vi.fn() }));
+vi.mock("#execution/session-inbox/resume.js", () => ({ resumeSessionInbox: vi.fn() }));
 vi.mock("#internal/workflow/runtime.js", () => ({
   cancelRun,
   getRun,
@@ -24,6 +24,7 @@ vi.mock("#internal/workflow/runtime.js", () => ({
 
 const entry = {
   createdByTurnId: "turn-1",
+  dispatchContext: { auth: { current: null, initiator: null } },
   executor: { data: { hookToken: "run-hook", runId: "run-1" }, kind: "workflow-tool" },
   metadata: { kind: "tool", name: "export" },
   taskId: "task-1",
@@ -192,77 +193,13 @@ describe("task cancellation", () => {
   });
 });
 
-describe("task updates", () => {
-  beforeEach(() => vi.resetAllMocks());
-
-  it("forwards a task-owned update and confirms delivery", async () => {
-    const deliverUpdate = vi.fn(async () => "task-1");
-
-    const result = await executeTaskControlAction({
-      deliverUpdate,
-      action: {
-        callId: "call-update",
-        input: { message: "Working" },
-        kind: "tool-call",
-        toolName: "task_update",
-      },
-      bundle: {} as never,
-      parentStepIndex: 2,
-      parentTurnId: "turn-child",
-      serializedContext: { "eve.sessionCallback": { taskId: "task-1" } },
-      session: {} as never,
-    });
-
-    expect(deliverUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update: expect.objectContaining({
-          message: "Working",
-          updateEpoch: "turn-child",
-          updateIndex: 2,
-        }),
-      }),
+describe("task control actions", () => {
+  it.each([
+    ["task_cancel", true],
+    ["task_update", false],
+  ])("recognizes %s as a task control: %s", (toolName, expected) => {
+    expect(isTaskControlAction({ callId: "call-1", input: {}, kind: "tool-call", toolName })).toBe(
+      expected,
     );
-    expect(result.result).toMatchObject({ output: { status: "sent", taskId: "task-1" } });
-  });
-
-  it("forwards a local task-owned child update through the subagent adapter hook", async () => {
-    const deliverUpdate = vi.fn(async () => "task-1");
-    const result = await executeTaskControlAction({
-      deliverUpdate,
-      action: {
-        callId: "call-update",
-        input: { message: "Working" },
-        kind: "tool-call",
-        toolName: "task_update",
-      },
-      adapter: {
-        kind: "subagent",
-        state: {
-          callId: "call-agent",
-          parentContinuationToken: "agent-reply-hook",
-          parentSessionId: "session-parent",
-          subagentName: "worker",
-          taskId: "task-1",
-        },
-      },
-      bundle: {} as never,
-      parentStepIndex: 2,
-      parentTurnId: "turn-child",
-      serializedContext: {},
-      session: {} as never,
-    });
-
-    expect(deliverUpdate).toHaveBeenCalledWith({
-      adapter: expect.objectContaining({ kind: "subagent" }),
-      callback: undefined,
-      update: {
-        callId: "call-update",
-        kind: "task-update",
-        message: "Working",
-        updateEpoch: "turn-child",
-        updateIndex: 2,
-      },
-    });
-    expect(result.result).toMatchObject({ output: { status: "sent", taskId: "task-1" } });
   });
 });

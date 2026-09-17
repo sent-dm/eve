@@ -30,7 +30,7 @@ describe("blocking workflow agent continuation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(prepareOwnerAgentInvocation).mockImplementation(async (input) => {
-      const session = await readDurableSession(input.sessionState);
+      const session = readDurableSession(input.sessionState);
       return {
         adapter: {},
         adapterCtx: {},
@@ -188,12 +188,13 @@ describe("blocking workflow agent continuation", () => {
       });
       expect(dispatched).toMatchObject({ agentId: identity.id, kind: "dispatched" });
       if (dispatched.kind !== "dispatched") throw new Error("Expected dispatch.");
-      const claimed = getAgentHandleStore(dispatched.sessionState.snapshot?.session.state)?.handles;
+      const claimed = getAgentHandleStore(dispatched.sessionState.snapshot.session.state)?.handles;
       expect(claimed).toEqual([
         expect.objectContaining({ identity, ownerId: "workflow-run-1", phase: "claimed" }),
       ]);
 
       const settled = await settleTaskAgentInvocationStep({
+        serializedContext: dispatched.serializedContext ?? {},
         ownerId: "workflow-run-1",
         result: {
           callId,
@@ -215,7 +216,7 @@ describe("blocking workflow agent continuation", () => {
         sessionState: dispatched.sessionState,
       });
       sessionState = settled.sessionState;
-      expect(getAgentHandleStore(sessionState.snapshot?.session.state)?.handles).toEqual([
+      expect(getAgentHandleStore(sessionState.snapshot.session.state)?.handles).toEqual([
         { address, identity, phase: "available" },
       ]);
     }
