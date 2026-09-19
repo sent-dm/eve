@@ -31,7 +31,7 @@ export default defineTaskEval({
     const initialTaskId = requireBackgroundTaskId(setup);
     const initial = await waitForCompletedTask(
       t,
-      t,
+      setup.session,
       "CHILD-TASK-EXCLUSIVITY-VERIFY",
       initialTaskId,
     );
@@ -40,7 +40,7 @@ export default defineTaskEval({
       initialTaskId,
     );
 
-    const race = await sendAndFollowQueuedTurn(t, "CHILD-TASK-EXCLUSIVITY-RACE", t, {
+    const race = await sendAndFollowQueuedTurn(t, "CHILD-TASK-EXCLUSIVITY-RACE", initial.session, {
       allowFailedActions: true,
     });
     const raced = race.turn;
@@ -54,7 +54,7 @@ export default defineTaskEval({
     });
     raced.calledSubagent("busy-worker", {
       count: 1,
-      status: "completed",
+      status: "working",
     });
     raced.calledTool("busy-worker", {
       count: 1,
@@ -69,7 +69,7 @@ export default defineTaskEval({
       held.session,
     );
     later.turn.expectOk();
-    later.turn.calledSubagent("busy-worker", { count: 1, status: "completed" });
+    later.turn.calledSubagent("busy-worker", { count: 1, status: "working" });
     const steeredTaskId = requireBackgroundTaskId(later.turn);
     await t.require(steeredTaskId, equals(admittedTaskId));
     // Steering retains the existing request; it does not publish a replacement approval.

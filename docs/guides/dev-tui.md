@@ -17,19 +17,19 @@ The transcript remains in your terminal scrollback after you exit. Run `/help` i
 
 | Command     | Description                                                                                                                                                  |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/login`    | Connect a ChatGPT subscription, Vercel account, or provider API key.                                                                                         |
-| `/model`    | Choose the model and its settings. Pass a model ID to set it directly: `/model provider/model-id`.                                                           |
-| `/add`      | Select and install channels, MCP connections, extensions, and observability integrations. Pass an item address to install it directly: `/add channel/slack`. |
-| `/deploy`   | Deploy the agent to Vercel production. Installs the Vercel CLI, signs in, and links the directory if needed.                                                 |
-| `/info`     | Show the resolved application, compiled artifacts, discovery diagnostics, and messaging routes.                                                              |
-| `/loglevel` | Choose which server and agent logs appear in the transcript.                                                                                                 |
-| `/traces`   | Open the local trace viewer. Pass a trace ID prefix to open a specific trace.                                                                                |
+| `/model`    | Choose the model, speed, and reasoning. Pass a model ID to set it directly: `/model provider/model-id`.                                                      |
 | `/reset`    | Start a fresh session.                                                                                                                                       |
-| `/cancel`   | Cancel the current turn without discarding settled context.                                                                                                  |
 | `/clear`    | Clear the session's model-message history. `/new` is an alias.                                                                                               |
 | `/compact`  | Compact the current session's context.                                                                                                                       |
-| `/exit`     | Quit the UI.                                                                                                                                                 |
+| `/cancel`   | Cancel the current turn without discarding settled context.                                                                                                  |
+| `/login`    | Connect a ChatGPT subscription, Vercel account, or provider API key.                                                                                         |
+| `/add`      | Select and install channels, MCP connections, extensions, and observability integrations. Pass an item address to install it directly: `/add channel/slack`. |
+| `/deploy`   | Deploy the agent to Vercel production. Installs the Vercel CLI, signs in, and links the directory if needed.                                                 |
+| `/traces`   | Open the local trace viewer. Pass a trace ID prefix to open a specific trace.                                                                                |
+| `/loglevel` | Choose which server and agent logs appear in the transcript.                                                                                                 |
+| `/info`     | Show the resolved application, compiled artifacts, discovery diagnostics, and messaging routes.                                                              |
 | `/help`     | List available commands.                                                                                                                                     |
+| `/exit`     | Quit the UI.                                                                                                                                                 |
 
 `/login`, `/model`, `/add`, `/deploy`, `/info`, and `/traces` are available when `eve dev` runs locally. They are unavailable when the UI connects to a server with `--url`.
 
@@ -59,7 +59,17 @@ Local discovery runs only in development. Deployments need explicitly provisione
 
 ### Models and settings
 
-`/model` opens the model picker and settings. Each completed selection applies immediately and returns to chat; there is no final Done step. A successful login or model change takes effect on the next prompt.
+`/model` walks through model, speed, and reasoning in order:
+
+1. Choose a model. Type to filter the list.
+2. Choose **Standard** or **Fast** speed, when supported.
+3. Choose a reasoning level, when the model supports reasoning settings. **Provider default** leaves the reasoning level to the provider.
+
+The picker highlights your current settings when they are compatible with the selected model and skips settings that cannot be changed. Use `↑` and `↓` to move, then `Enter` to advance or apply the final choice. `Esc` or `←` returns to the previous step; at the model list, either key cancels. `Ctrl+C` cancels from any step.
+
+Changes apply together after the final choice, then the picker returns to chat. Cancelling leaves your model and settings unchanged.
+
+A successful login or model change takes effect on the next prompt.
 
 OpenAI, ChatGPT, and Gateway connections default to `gpt-5.6-luna-fast`; Anthropic defaults to `claude-sonnet-5`. An explicitly authored compatible model stays selected. If a new default is unavailable, eve offers the connection's available models. Dynamic or custom model expressions must be edited in `agent.ts`.
 
@@ -82,6 +92,8 @@ Required authorization or deployment setup still runs for the selected item. Pre
 
 Type a message and press `Enter` to send it. When the agent asks a question or requests tool approval, respond in the prompt shown by the UI. Connection authorization can open a browser; keep local `eve dev` running until the browser returns to it.
 
+The activity line shows **Thinking** while the model reasons or waits to respond, **Generating** while it writes a response or tool input, and **Running** while tools execute. A blinking dot and elapsed time indicate progress, with token counts shown when available. The activity line disappears when the turn finishes or needs your input.
+
 While a turn is running, `Enter` sends your message immediately as steering. Before assistant output begins, the runtime interrupts pending model generation and continues the same turn with your correction. Executing tools finish safely. After output begins, steering applies at the next workflow boundary and preserves streamed text.
 
 Slash commands wait until the turn ends, except `/cancel`, which cancels directly. If the session does not support steering, messages queue for the next turn. Press `Esc` or `Ctrl+C` to cancel a turn with no queued messages. With queued messages, these keys select the oldest message for steering, or for the next turn if steering is unavailable. If a direct cancellation requested with `/cancel` or `Ctrl+C` does not settle, press `Ctrl+C` to stop waiting. The UI then returns to the prompt and asks you to press `Ctrl+C` again to exit. At an idle prompt, press `Ctrl+C` twice to exit.
@@ -102,7 +114,7 @@ By default, the UI shows `stderr` logs. Use `/loglevel <all|stderr|sandbox|none>
 
 Every `eve dev` process writes diagnostic logs to `.eve/logs/`, regardless of the display mode. Read them with [`eve logs`](../reference/cli#eve-logs).
 
-Use `/traces` to inspect traces recorded during local development. See [Instrumentation](../observability/instrumentation#local-traces) for trace capture and retention settings.
+Use `/traces` to inspect traces recorded during local development. See [Local traces](../observability/otel#local-traces) for trace capture and retention settings.
 
 ## Display options
 

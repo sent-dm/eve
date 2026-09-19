@@ -6,7 +6,9 @@ import {
   MessageResponse,
   type AgentInfoResult,
   type ClientSession,
+  type CreateSessionOptions,
   type MessageStreamEvent,
+  type SendTurnInput,
 } from "#client/index.js";
 import { getApplicationInfo } from "#internal/application/paths.js";
 import { stampTestEvent } from "#internal/testing/events.js";
@@ -37,7 +39,7 @@ import { interruptedError } from "./errors.js";
 import type { RemoteAuthFlow } from "./remote-auth.js";
 import type { RemoteAuthCompletedMutation } from "./remote-auth-result.js";
 import type { RemoteConnectionControllerOptions } from "./remote-connection.js";
-import type { BootDetection, SetupIssue } from "./setup-issues.js";
+import type { BootDetection, BootDetectionContext, SetupIssue } from "./setup-issues.js";
 import type { SetupFlowRenderer } from "./setup-flow.js";
 import { createFakeSetupFlowRenderer } from "./test/fake-setup-flow-renderer.js";
 import type { VercelStatusSnapshot } from "./vercel-status.js";
@@ -53,19 +55,25 @@ const VERCEL_SSO_URL =
 describe("registryHandoffAddress", () => {
   it("accepts only a terminal handoff from the self-modification registry tool", () => {
     expect(
-      registryHandoffAddress("selfmod__registry_add", {
+      registryHandoffAddress("self-modification__agent", "registry_add", {
         status: "needs-terminal",
         address: "channel/slack",
       }),
     ).toBe("channel/slack");
     expect(
-      registryHandoffAddress("selfmod__registry_add", {
+      registryHandoffAddress("other__agent", "registry_add", {
+        status: "needs-terminal",
+        address: "channel/slack",
+      }),
+    ).toBeUndefined();
+    expect(
+      registryHandoffAddress("self-modification__agent", "registry_add", {
         status: "installed",
         address: "extension/browserbase",
       }),
     ).toBeUndefined();
     expect(
-      registryHandoffAddress("other_tool", {
+      registryHandoffAddress("self-modification__agent", "other_tool", {
         status: "needs-terminal",
         address: "channel/slack",
       }),
@@ -259,7 +267,7 @@ describe("registryHandoffAddress", () => {
                     callId: "registry-add",
                     input: { address: "channel/slack" },
                     kind: "tool-call",
-                    toolName: "selfmod__registry_add",
+                    toolName: "registry_add",
                   },
                 ],
                 sequence: 1,
@@ -279,7 +287,7 @@ describe("registryHandoffAddress", () => {
                       callId: "registry-add",
                       input: { address: "channel/slack" },
                       kind: "tool-call",
-                      toolName: "selfmod__registry_add",
+                      toolName: "registry_add",
                     },
                     display: "confirmation",
                     kind: "tool-approval",
@@ -287,7 +295,7 @@ describe("registryHandoffAddress", () => {
                       { id: "approve", label: "Approve" },
                       { id: "cancel", label: "Cancel" },
                     ],
-                    prompt: "Approve tool call: selfmod__registry_add",
+                    prompt: "Approve tool call: registry_add",
                     requestId: "approval-1",
                   },
                 ],
@@ -319,7 +327,7 @@ describe("registryHandoffAddress", () => {
                     callId: "registry-add",
                     input: { address: "channel/slack" },
                     kind: "tool-call",
-                    toolName: "selfmod__registry_add",
+                    toolName: "registry_add",
                   },
                 ],
                 sequence: 3,
@@ -337,7 +345,7 @@ describe("registryHandoffAddress", () => {
                   callId: "registry-add",
                   kind: "tool-result",
                   output: { status: "needs-terminal", address: "channel/slack" },
-                  toolName: "selfmod__registry_add",
+                  toolName: "registry_add",
                 },
                 sequence: 4,
                 status: "completed",
@@ -385,7 +393,7 @@ describe("registryHandoffAddress", () => {
             callId: "selfmod-call",
             childSessionId: "child-session",
             childStreamPath: "/eve/v1/session/child-session/stream",
-            name: "self-modification",
+            name: "self-modification__agent",
             sequence: 0,
             turnId: "parent-turn",
           },
@@ -431,10 +439,12 @@ function stubSession(): ClientSession {
 }
 
 function mockSessionCreation(client: Client, session: ClientSession) {
-  return vi.spyOn(client.sessions, "create").mockImplementation(async (input) => ({
-    response: await session.send(input.message, input),
-    session,
-  }));
+  return vi
+    .spyOn(client.sessions, "create")
+    .mockImplementation(async (input: CreateSessionOptions | SendTurnInput = {}) => {
+      if (!("message" in input)) return { session };
+      return { response: await session.send(input.message, input), session };
+    });
 }
 
 /**
@@ -552,7 +562,7 @@ function idleSetupFlow(): SetupFlowRenderer {
     readSelect: vi.fn(async () => undefined),
     readEditableSelect: vi.fn(async () => undefined),
     readProviderPicker: vi.fn(async () => undefined),
-    readModelEditor: vi.fn(async () => undefined),
+    readModelPicker: vi.fn(async () => undefined),
     readText: vi.fn(async () => undefined),
     readAcknowledge: vi.fn(async () => {}),
     readChoice: vi.fn(() => ({ choice: Promise.resolve(undefined), close: vi.fn() })),
@@ -586,6 +596,28 @@ async function settleAsyncWork(): Promise<void> {
 }
 
 describe("EveTUIRunner agent header", () => {
+  it("opens the prompt after two seconds when startup inspection stalls", async () => {
+    vi.useFakeTimers();
+    const client = stubClient();
+    vi.spyOn(client, "info").mockImplementation(
+      async () => await new Promise<AgentInfoResult>(() => {}),
+    );
+    const renderer = fakeRenderer();
+    const runner = new EveTUIRunner({
+      session: stubSession(),
+      client,
+      renderer,
+      serverUrl: "http://localhost:3000",
+    });
+    const run = runner.run();
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(renderer.readPrompt).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+    expect(renderer.readPrompt).toHaveBeenCalled();
+    expect(client.info).toHaveBeenCalledOnce();
+  });
+
   it("reports the paint boundary before rendering the startup header", async () => {
     const order: string[] = [];
     const client = stubClient();
@@ -781,6 +813,7 @@ describe("EveTUIRunner agent header", () => {
 
     const run = runner.run();
     await settleAsyncWork();
+    await vi.advanceTimersByTimeAsync(0);
     expect(headers).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
@@ -2035,7 +2068,6 @@ describe("EveTUIRunner initial input", () => {
     vi.spyOn(client, "info").mockReturnValue(info.promise);
     const startup = {
       finish: vi.fn(() => ({ draft: "typed while loading", queuedPrompt: undefined })),
-      headerTip: "Use the /help command to see every command.",
     };
     const renderer = fakeRenderer();
     const runner = new EveTUIRunner({
@@ -2063,16 +2095,21 @@ describe("EveTUIRunner initial input", () => {
     async (result) => {
       const login = createDeferred<void>();
       const startup = {
-        headerTip: "/help",
         finish: vi.fn(() => ({ draft: "still editing", queuedPrompt: "Hello Alice" })),
       };
       const handle = vi.fn(async () => {
         await login.promise;
-        return result === "cancelled" ? { cancelled: true as const } : { tone: "error" as const };
+        return result === "cancelled"
+          ? { cancelled: true as const, message: "Connect a model with /login when you’re ready." }
+          : { tone: "error" as const, message: "Could not connect. Retry with /login." };
       });
       const session = stubSession();
       vi.spyOn(session, "send");
-      const renderer = fakeRenderer({ setupFlow: createFakeSetupFlowRenderer() });
+      const renderer = fakeRenderer({
+        setupFlow: createFakeSetupFlowRenderer(),
+        renderCommandInvocation: vi.fn(),
+        renderCommandResult: vi.fn(),
+      });
       const runner = new EveTUIRunner({
         session,
         renderer,
@@ -2092,6 +2129,13 @@ describe("EveTUIRunner initial input", () => {
       expect(renderer.readPrompt).toHaveBeenCalledWith(
         expect.objectContaining({ initialDraft: "Hello Alice\n\nstill editing" }),
       );
+      expect(renderer.renderCommandInvocation).not.toHaveBeenCalled();
+      expect(renderer.renderCommandResult).toHaveBeenCalledWith(
+        result === "cancelled"
+          ? "Connect a model with /login when you’re ready."
+          : "Could not connect. Retry with /login.",
+        result === "error" ? "error" : undefined,
+      );
     },
   );
 
@@ -2104,7 +2148,6 @@ describe("EveTUIRunner initial input", () => {
         draft: "still editing",
         queuedPrompt: "first message\n\nsecond message",
       })),
-      headerTip: "Use the /help command to see every command.",
     };
     const renderer = fakeRenderer();
     const runner = new EveTUIRunner({
@@ -2388,10 +2431,7 @@ describe("EveTUIRunner failure rendering", () => {
       { type: "session.failed", data: { ...failureData, sessionId: "s0" } },
     ]);
     const client = stubClient();
-    vi.spyOn(client.sessions, "create").mockImplementation(async (input) => {
-      const session = sessionYielding([]);
-      return { response: await session.send(input.message, input), session };
-    });
+    mockSessionCreation(client, sessionYielding([]));
 
     const renderer: AgentTUIRenderer = {
       readPrompt: vi.fn(async () => prompts.shift()),
@@ -3582,6 +3622,67 @@ describe("EveTUIRunner renderer teardown", () => {
     expect(completeSubagent).toHaveBeenCalledWith({ authoritative: true, callId: "call-child" });
   });
 
+  it("keeps a subagent section open when action.result returns a working receipt", async () => {
+    const backgroundSubagent = vi.fn();
+    const completeSubagent = vi.fn();
+    const runner = new EveTUIRunner({
+      name: "Weather Agent",
+      renderer: fakeRenderer({
+        readPrompt: vi.fn().mockResolvedValueOnce("delegate").mockResolvedValueOnce(undefined),
+        renderStream: vi.fn(async (result) => {
+          for await (const event of result.events as AsyncIterable<unknown>) void event;
+        }),
+        subagents: {
+          begin: vi.fn(),
+          background: backgroundSubagent,
+          upsertStep: vi.fn(),
+          upsertTool: vi.fn(),
+          removeTool: vi.fn(),
+          markChildToolCallId: vi.fn(),
+          complete: completeSubagent,
+        },
+      }),
+      session: sessionYielding([
+        {
+          type: "subagent.called",
+          data: {
+            callId: "call-child",
+            childSessionId: "child-session",
+            childStreamPath: "/eve/v1/session/child-session/stream",
+            name: "researcher",
+            sequence: 0,
+            sessionId: "parent-session",
+            toolName: "researcher",
+            turnId: "turn-parent",
+            workflowId: "workflow-parent",
+          },
+        },
+        {
+          type: "action.result",
+          data: {
+            status: "completed",
+            sequence: 1,
+            stepIndex: 0,
+            turnId: "turn-parent",
+            result: {
+              kind: "tool-result",
+              callId: "call-child",
+              output: { agentId: "agent-1", status: "working", taskId: "task_123" },
+              toolName: "researcher",
+            },
+          },
+        },
+        { type: "turn.completed", data: { sequence: 0, turnId: "turn-parent" } },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ]),
+    });
+
+    await runner.run();
+
+    expect(backgroundSubagent).toHaveBeenCalledWith({ callId: "call-child" });
+    expect(completeSubagent).not.toHaveBeenCalled();
+  });
+
   it("does not settle a subagent section when completed carries a background receipt", async () => {
     const backgroundSubagent = vi.fn();
     const completeSubagent = vi.fn();
@@ -4021,6 +4122,65 @@ describe("EveTUIRunner boot setup detection", () => {
     expect(warnings).toEqual(["1 setup issue: AI Gateway credentials · /model"]);
   });
 
+  it("clears a startup warning when a later agent-info probe reports connected OAuth", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ revision: "snapshot-a" })),
+    );
+    const connectedGatewayInfo: AgentInfoResult = {
+      ...AGENT_INFO,
+      agent: {
+        ...AGENT_INFO.agent,
+        model: {
+          id: "gpt-5",
+          routing: { kind: "gateway", target: "openai" },
+          endpoint: {
+            kind: "gateway",
+            connected: true,
+            credential: "oauth",
+            team: "alice",
+          },
+        },
+      },
+    };
+    const client = stubClient();
+    vi.spyOn(client, "info")
+      .mockRejectedValueOnce(new Error("server not ready"))
+      .mockResolvedValue(connectedGatewayInfo);
+    const warningCleared = createDeferred<void>();
+    const renderSetupWarning = vi.fn();
+    const clearSetupWarning = vi.fn(() => warningCleared.resolve());
+    const detect = vi.fn(({ info }: BootDetectionContext) =>
+      info === undefined
+        ? [{ kind: "attention" as const, label: "connect a model", command: "/login" }]
+        : [],
+    );
+    const runner = new EveTUIRunner({
+      session: stubSession(),
+      client,
+      renderer: fakeRenderer({
+        renderSetupWarning,
+        clearSetupWarning,
+        readPrompt: vi.fn(async () => {
+          await warningCleared.promise;
+          return undefined;
+        }),
+      }),
+      serverUrl: "http://localhost:3000",
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      bootDetections: [{ id: "test", detect }],
+      detectProjectIdentity: vi.fn(async () => undefined),
+    });
+
+    await runner.run();
+
+    expect(renderSetupWarning).toHaveBeenCalledWith("1 setup issue: connect a model · /login");
+    expect(clearSetupWarning).toHaveBeenCalled();
+    expect(client.info).toHaveBeenCalledTimes(2);
+    expect(detect.mock.calls.at(-1)?.[0].info).toBe(connectedGatewayInfo);
+  });
+
   it("does not auto-open /model outside the prefilled onboarding launch", async () => {
     const handle = vi.fn(async () => ({ message: "/model dismissed." }));
     const runner = new EveTUIRunner({
@@ -4088,7 +4248,7 @@ describe("EveTUIRunner boot setup detection", () => {
     const run = runner.run();
     await vi.waitFor(() => expect(readPrompt).toHaveBeenCalledOnce());
     expect(client.info).toHaveBeenCalledTimes(2);
-    expect(renderCommandResult).toHaveBeenCalledOnce();
+    expect(renderCommandResult).not.toHaveBeenCalled();
     expect(renderSetupWarning).not.toHaveBeenCalled();
     expect(setStartupPhase).toHaveBeenLastCalledWith(undefined);
     await run;
@@ -4236,7 +4396,7 @@ describe("EveTUIRunner boot setup detection", () => {
     await runner.run();
     await vi.waitFor(() => expect(clearSetupWarning).toHaveBeenCalled());
 
-    expect(renderCommandResult).toHaveBeenCalledWith("AI Gateway via API key selected.", undefined);
+    expect(renderCommandResult).not.toHaveBeenCalled();
     expect(client.info).toHaveBeenCalledTimes(2);
     expect(detect).not.toHaveBeenCalled();
     expect(headers.at(-1)?.info?.agent.model.endpoint).toMatchObject({
@@ -4731,7 +4891,7 @@ describe("EveTUIRunner command shutdown", () => {
   });
 });
 
-it("starts onboarding with only login and preserves the input draft", async () => {
+it("starts onboarding without login history and preserves the input draft", async () => {
   const order: string[] = [];
   const handle = vi.fn(async (command: { name: string }) => {
     order.push(command.name);
@@ -4739,6 +4899,8 @@ it("starts onboarding with only login and preserves the input draft", async () =
   });
   const renderer = fakeRenderer({
     setupFlow: createFakeSetupFlowRenderer(),
+    renderCommandInvocation: vi.fn(),
+    renderCommandResult: vi.fn(),
     readPrompt: vi.fn(async (options?: AgentTUISessionOptions) => {
       order.push("prompt");
       expect(options?.initialDraft).toBe("Hello Alice");
@@ -4757,4 +4919,29 @@ it("starts onboarding with only login and preserves the input draft", async () =
   });
   await runner.run();
   expect(order).toEqual(["login", "prompt"]);
+  expect(renderer.renderCommandInvocation).not.toHaveBeenCalled();
+  expect(renderer.renderCommandResult).not.toHaveBeenCalled();
+});
+
+it("keeps the result of an explicit login command after onboarding", async () => {
+  const prompts = ["/login", undefined];
+  const handle = vi.fn(async () => ({ message: "Connected." }));
+  const renderer = fakeRenderer({
+    setupFlow: createFakeSetupFlowRenderer(),
+    renderCommandResult: vi.fn(),
+    readPrompt: vi.fn(async () => prompts.shift()),
+  });
+  const runner = new EveTUIRunner({
+    session: sessionYielding([]),
+    renderer,
+    appRoot: "/tmp/agent",
+    onboard: true,
+    bootDetections: [],
+    promptCommandHandler: { handle },
+  });
+
+  await runner.run();
+
+  expect(handle).toHaveBeenCalledTimes(2);
+  expect(renderer.renderCommandResult).toHaveBeenCalledExactlyOnceWith("Connected.", undefined);
 });

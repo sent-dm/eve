@@ -185,11 +185,13 @@ function createResolvedAgentConfig(
   const config: {
     compaction?: NonNullable<ResolvedAgent["config"]>["compaction"];
     defaultTools?: boolean;
+    description?: string;
     experimental?: NonNullable<ResolvedAgent["config"]>["experimental"];
     name: string;
     outputSchema?: NonNullable<ResolvedAgent["config"]>["outputSchema"];
     reasoning?: NonNullable<ResolvedAgent["config"]>["reasoning"];
     source?: NonNullable<ResolvedAgent["config"]>["source"];
+    tool?: boolean;
     limits?: NonNullable<ResolvedAgent["config"]>["limits"];
   } = {
     name: manifest.config.name,
@@ -197,6 +199,9 @@ function createResolvedAgentConfig(
 
   if (manifest.config.defaultTools !== undefined) {
     config.defaultTools = manifest.config.defaultTools;
+  }
+  if (manifest.config.description !== undefined) {
+    config.description = manifest.config.description;
   }
 
   if (manifest.config.compaction !== undefined) {
@@ -237,7 +242,6 @@ function createResolvedAgentConfig(
 
   if (manifest.config.experimental !== undefined) {
     config.experimental = {
-      instrumentationProviders: manifest.config.experimental.instrumentationProviders,
       workflow:
         manifest.config.experimental.workflow === undefined
           ? undefined
@@ -259,6 +263,10 @@ function createResolvedAgentConfig(
 
   if (manifest.config.source !== undefined) {
     config.source = createResolvedModuleSourceRef(manifest.config.source);
+  }
+
+  if (manifest.config.tool !== undefined) {
+    config.tool = manifest.config.tool;
   }
 
   if (manifest.config.limits !== undefined) {

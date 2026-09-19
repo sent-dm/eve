@@ -1,29 +1,29 @@
 ---
 title: Automatic Model Selection
-description: "Choose an agent model from the current request with an AI SDK evaluation model."
+description: "Choose agent models automatically or evaluate typed questions in your tools and application code."
 ---
 
-Use `autoModel` to choose an agent model from an allowlist before inference begins.
-It uses the [AI SDK evaluation API](https://ai-sdk.dev/docs/ai-sdk-core/evaluation),
+Use `auto` from `eve/models` to choose an agent model from an allowlist before
+inference begins. It uses the [AI SDK evaluation API](https://ai-sdk.dev/docs/ai-sdk-core/evaluation),
 so the evaluator can be a Vercel AI Gateway model ID or an evaluation model from
-an installed provider.
+an installed provider. Use `evaluate` from `eve/ai` to ask typed questions in
+your own tools or application code.
 
-`eve/experimental/evaluate` is experimental. Its API can change between eve
-releases, and the AI SDK evaluation model specification can change in patch
-releases.
+The AI SDK evaluation model specification is experimental and can change in
+patch releases.
 
 ## Choose from Gateway models
 
-By default, `autoModel` evaluates with `typesafe-ai/jev`. Like other AI SDK
+By default, `auto` evaluates with `typesafe-ai/jev`. Like other AI SDK
 model strings, it uses Vercel AI Gateway unless the application has configured a
 different global default provider.
 
 ```ts title="agent/agent.ts"
 import { defineAgent } from "eve";
-import { autoModel } from "eve/experimental/evaluate";
+import { auto } from "eve/models";
 
 export default defineAgent({
-  model: autoModel({
+  model: auto({
     options: {
       "openai/gpt-5.6-sol": "Difficult reasoning and engineering tasks",
       "openai/gpt-5.6-luna": "Routine tasks where fast completion matters",
@@ -37,7 +37,7 @@ does not add a TypeSafe credential or transport layer. During `eve dev`, a
 Gateway evaluator uses the same connection selected through `/login` as Gateway
 language models. A configured AI SDK default provider still owns string model
 resolution during development. The TUI footer displays `dynamic model` when the
-agent uses `autoModel`, then adds the resolved model for the current turn, such as
+agent uses `auto`, then adds the resolved model for the current turn, such as
 `dynamic model · openai/gpt-5.6-luna`.
 
 ## Use a provider directly
@@ -52,10 +52,10 @@ pnpm add @ai-sdk/typesafe-ai
 ```ts title="agent/agent.ts"
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
 import { defineAgent } from "eve";
-import { autoModel } from "eve/experimental/evaluate";
+import { auto } from "eve/models";
 
 export default defineAgent({
-  model: autoModel({
+  model: auto({
     model: typeSafeAi.evaluationModel("jev-latest"),
     options: {
       "openai/gpt-5.6-sol": "Difficult reasoning and engineering tasks",
@@ -77,11 +77,11 @@ a provider instance, an alias, or needs a reasoning override.
 ```ts title="agent/agent.ts"
 import { anthropic } from "@ai-sdk/anthropic";
 import { defineAgent } from "eve";
-import { autoModel } from "eve/experimental/evaluate";
+import { auto } from "eve/models";
 
 export default defineAgent({
   reasoning: "medium",
-  model: autoModel({
+  model: auto({
     options: {
       "openai/gpt-5.6-sol": "Hard problems",
       my_secret_model: {
@@ -103,9 +103,86 @@ Supported reasoning values are `"provider-default"`, `"none"`, `"minimal"`,
 `"low"`, `"medium"`, `"high"`, and `"xhigh"`. An omitted value inherits the
 agent's reasoning setting.
 
+## Evaluate inside a tool
+
+Use `evaluate` to ask choice, score, or boolean questions about the state you pass to it.
+It defaults to `typesafe-ai/jev` and uses the same authentication as `auto`,
+including the Gateway connection selected through `/login` during `eve dev`.
+Pass `model` to use another evaluation model ID or a provider instance. A configured
+AI SDK default provider takes precedence over the local Gateway connection.
+
+```ts title="agent/tools/classify-request.ts"
+import { evaluate } from "eve/ai";
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Choose the team that can help with a customer request.",
+  inputSchema: z.object({ request: z.string().min(1).max(8000) }),
+  async execute({ request }, ctx) {
+    const result = await evaluate({
+      state: { request },
+      questions: {
+        team: {
+          type: "choice",
+          instructions: "Select the team best suited to handle the request.",
+          criteria: {
+            billing: "Invoices, payments, and refunds",
+            support: "Product questions and troubleshooting",
+          },
+        },
+      },
+      abortSignal: ctx.abortSignal,
+    });
+    return { team: result.answers.team.choice };
+  },
+});
+```
+
+The choice above is typed as `"billing" | "support"`. Each question appears under
+its authored key in `result.answers`. Results also include token usage, warnings,
+provider metadata, and response metadata. To use that choice to delegate while keeping specialist subagents out of the parent model's tools, see [Route to a hidden subagent with JEV](/docs/tools/workflows#route-to-a-hidden-subagent-with-jev).
+
+`evaluate` accepts AI SDK evaluation options, including `maxRetries`, `headers`,
+and `providerOptions`. Pass an `abortSignal` to cancel the request. Input and
+answer validation, retries, and provider errors follow AI SDK semantics.
+
+You can also call `evaluate` outside a tool; it does not require an active eve
+session. Each call performs its own evaluation. `auto` uses this function
+and adds the per-turn routing behavior described below.
+
+## Judge eval results
+
+Eval authors can use `t.judge(...)` to turn evaluation answers into scored assertions, including batches of questions sharing one state. It uses this same `evaluate` implementation and default model. See [Judge](../evals/judge) for criteria, rubrics, and thresholds.
+
+## Evaluate tool approvals
+
+Use `auto({ model? })` when an evaluation model should decide whether a
+tool call can run automatically or needs human approval. It accepts the same
+AI SDK evaluation model strings and provider instances described above and
+defaults to `typesafe-ai/jev`:
+
+```ts title="agent/tools/deploy.ts"
+import { defineTool } from "eve/tools";
+import { auto } from "eve/tools/approval";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Deploy an application.",
+  inputSchema: z.object({ environment: z.string() }),
+  approval: auto({ model: "typesafe-ai/jev" }), // Uses AI SDK string-model resolution
+  execute: ({ environment }) => deploy(environment),
+});
+```
+
+The evaluation model reviews the tool name and input for dangerous effects. A
+caution, failed review, or incomplete input requires human approval. See
+[Human-in-the-loop approvals](/docs/human-in-the-loop#approvals) for classifier
+options and data handling.
+
 ## Runtime behavior
 
-`autoModel` evaluates at the first `step.started` event, after the incoming prompt
+`auto` evaluates at the first `step.started` event, after the incoming prompt
 is available and before the selected language model runs. It reuses that choice
 for later tool-loop steps in the same turn. A new turn makes a new choice, and
 child sessions route from their own prompts.

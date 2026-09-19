@@ -62,6 +62,7 @@ export function normalizeAgentDefinition(
       "modelOptions",
       "outputSchema",
       "reasoning",
+      "tool",
     ],
     message,
   );
@@ -119,6 +120,10 @@ export function normalizeAgentDefinition(
 
   if (record.reasoning !== undefined) {
     definition.reasoning = normalizeAgentReasoningDefinition(record.reasoning, message);
+  }
+
+  if (record.tool !== undefined) {
+    definition.tool = expectBoolean(record.tool, message);
   }
 
   if (record.limits !== undefined) {
@@ -306,15 +311,8 @@ function normalizeAgentExperimentalDefinition(
   message: string,
 ): NonNullable<NormalizedAgentDefinition["experimental"]> {
   const record = expectObjectRecord(value, message);
-  expectOnlyKnownKeys(record, ["instrumentationProviders", "workflow"], message);
+  expectOnlyKnownKeys(record, ["workflow"], message);
   const normalizedDefinition: Mutable<NonNullable<NormalizedAgentDefinition["experimental"]>> = {};
-
-  if (record.instrumentationProviders !== undefined) {
-    if (typeof record.instrumentationProviders !== "boolean") {
-      throw new Error(`${message} "experimental.instrumentationProviders" must be a boolean.`);
-    }
-    normalizedDefinition.instrumentationProviders = record.instrumentationProviders;
-  }
 
   if (record.workflow !== undefined) {
     normalizedDefinition.workflow = normalizeAgentWorkflowDefinition(record.workflow, message);

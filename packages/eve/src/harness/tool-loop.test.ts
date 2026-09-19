@@ -11,7 +11,6 @@ import {
 } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
 import { ContextContainer, contextStorage } from "#context/container.js";
 import { DynamicModelSelectionError } from "#context/dynamic-model-lifecycle.js";
 import { dispatchDynamicInstructionEvent } from "#context/dynamic-instruction-lifecycle.js";
@@ -42,10 +41,7 @@ import { decodeSandboxRef, isSandboxRefUrl } from "#internal/attachments/sandbox
 import { attachClientContext } from "#internal/client-context.js";
 import { mockSandbox } from "#internal/testing/mocks/mock-sandbox.js";
 import type { UnstampedMessageStreamEvent } from "#protocol/message.js";
-import type {
-  InstrumentationEvents,
-  InstrumentationStepStartedEventInput,
-} from "#public/instrumentation/index.js";
+import type { InstrumentationStepStartedEventInput } from "#public/instrumentation/index.js";
 import { defineInstructions } from "#public/definitions/instructions.js";
 import type { ResolvedDynamicInstructionsResolver } from "#runtime/types.js";
 import { createPreparedRuntimeSubagentTool } from "#runtime/subagents/registry.js";
@@ -83,7 +79,7 @@ import {
   appendPendingInputBatch,
 } from "#harness/input-requests.js";
 import { activeTurnId } from "#harness/active-turn-id.js";
-import { recordSessionTask } from "#tasks/session-index.js";
+import { registerWorkflowToolRun } from "#harness/workflow-tool-runs.js";
 import { getPendingCoordinationBatch } from "#harness/coordination.js";
 import { AGENT_HANDLES_STATE_KEY } from "#subagents/handles/store.js";
 import { BackgroundToolExecutorKey } from "#harness/background-tools.js";
@@ -107,6 +103,7 @@ import {
   type InstrumentationRuntime,
   type SessionInstrumentation,
 } from "#instrumentation/runtime.js";
+import type { RuntimeContextResolver } from "#tracing/otel-declaration.js";
 import {
   CONDITIONAL_DELIVERY_INSTRUCTION,
   EMPTY_DELIVERY_SENTINEL,
@@ -196,7 +193,9 @@ function setConversationContext(
 
 function declareTelemetry(
   config:
-    | (Readonly<Record<string, unknown>> & { readonly events?: InstrumentationEvents })
+    | (Readonly<Record<string, unknown>> & {
+        readonly runtimeContext?: RuntimeContextResolver;
+      })
     | undefined,
   decision?: InstrumentationDecision,
   audience: ChannelAudience = "unknown",
@@ -213,11 +212,14 @@ function declareTelemetry(
           hooks: createInstrumentationHooks([]),
           otelSettings: {
             ...config,
+            recordInputs: config.recordInputs === true,
+            recordOutputs: config.recordOutputs === true,
             traceChannelRequests: config["traceChannelRequests"] === true,
           },
+          runtimeContextResolvers:
+            config.runtimeContext === undefined ? undefined : [config.runtimeContext],
           runInContext: (_operation, execute) => execute(),
           shutdown: async () => undefined,
-          stepStartedRuntimeContextResolver: config.events?.["step.started"] ?? (() => undefined),
         };
   declaredInstrumentation = bindInstrumentationRuntime(
     declaredRuntime,
@@ -245,9 +247,6 @@ function bindHookInstrumentation(
         : undefined,
       runInContext,
       shutdown: async () => undefined,
-      stepStartedRuntimeContextResolver: useDeclaredRuntime
-        ? declaredRuntime?.stepStartedRuntimeContextResolver
-        : undefined,
     },
     createInstrumentationContext(
       useDeclaredRuntime ? declaredDecision : undefined,
@@ -302,14 +301,17 @@ const analysisTaskAnnouncement =
   '[Task state]\n{"tasks":[{"name":"analysis","status":"pending","taskId":"analysis"}]}';
 
 function recordBackgroundTask(session: HarnessSession, taskId = "analysis"): HarnessSession {
-  return recordSessionTask(session, {
-    createdByTurnId: activeTurnId(getHarnessEmissionState(session.state)),
-    dispatchContext: { auth: { current: null, initiator: null } },
-    executor: { data: {}, kind: "workflow-tool" },
-    metadata: { kind: "report-probe", name: taskId },
-    taskId,
-    taskInboxToken: `token-${taskId}`,
-    taskRunId: `run-${taskId}`,
+  return registerWorkflowToolRun(session, {
+    callId: taskId,
+    toolName: { kind: "report-probe", name: taskId }.name,
+    lifetime: "session" as const,
+    origin: { turnId: activeTurnId(getHarnessEmissionState(session.state)), stepIndex: 0 },
+    address: { runId: `run-${taskId}`, hookToken: `token-${taskId}` },
+    task: {
+      dispatchContext: { auth: { current: null, initiator: null } },
+      metadata: { kind: "report-probe", name: taskId },
+      taskId,
+    },
   });
 }
 
@@ -355,7 +357,6 @@ function createDelegationToolMap(): ToolLoopHarnessConfig["tools"] {
         description: "Delegate to a subagent.",
         inputSchema: jsonSchema({ type: "object" }),
         name: "delegate",
-        resultKind: "subagent",
         workflowId: "workflow//./agent/subagents/researcher//execute",
       },
     ],
@@ -1243,6 +1244,7 @@ describe("createToolLoopHarness", () => {
               execution: "background" as const,
               inputSchema: jsonSchema({ type: "object" }),
               name: "background_work",
+              workflowId: "workflow//test//background_work",
             },
           ],
         ]),
@@ -1843,7 +1845,6 @@ describe("createToolLoopHarness", () => {
         callId: "call-1",
         input: { message: "delegate from child" },
         kind: "workflow-task",
-        resultKind: "subagent",
         toolName: "delegate",
       }),
     ]);
@@ -4173,7 +4174,6 @@ describe("createToolLoopHarness", () => {
             description: "Delegate to a subagent.",
             inputSchema: jsonSchema({ type: "object" }),
             name: "delegate",
-            resultKind: "subagent",
             workflowId: "workflow//./agent/subagents/researcher//execute",
           },
         ],
@@ -4230,7 +4230,6 @@ describe("createToolLoopHarness", () => {
             description: "Delegate to a subagent.",
             inputSchema: jsonSchema({ type: "object" }),
             name: "delegate",
-            resultKind: "subagent",
             workflowId: "workflow//./agent/subagents/researcher//execute",
           },
         ],
@@ -5458,15 +5457,11 @@ describe("createToolLoopHarness", () => {
 
     it("retries with the offending tool dropped and a one-shot system note", async () => {
       const resolveRuntimeContext = vi.fn((input: InstrumentationStepStartedEventInput) => ({
-        runtimeContext: {
-          "test.attempt": typeof input.modelInput.instructions === "string" ? "original" : "retry",
-        },
+        "test.attempt": typeof input.modelInput.instructions === "string" ? "original" : "retry",
       }));
       declareTelemetry(
         {
-          events: {
-            "step.started": resolveRuntimeContext,
-          },
+          runtimeContext: resolveRuntimeContext,
         },
         undefined,
         "public",
@@ -9912,9 +9907,9 @@ describe("createToolLoopHarness", () => {
       "session.started",
       "turn.started",
       "message.received",
+      "step.started",
       "compaction.requested",
       "compaction.completed",
-      "step.started",
       "message.completed",
       "step.completed",
       "turn.completed",
@@ -9943,7 +9938,7 @@ describe("createToolLoopHarness", () => {
     });
   });
 
-  it("selects the model from the pre-compaction view and dispatches step consumers after rewrite", async () => {
+  it("resolves model and step capabilities before compacting the final request", async () => {
     vi.mocked(shouldCompact).mockReturnValue(true);
     const compactedHistory: HarnessModelMessage[] = [
       { content: "Summary of our conversation so far:", kind: "context.compaction", role: "user" },
@@ -9999,7 +9994,7 @@ describe("createToolLoopHarness", () => {
     ];
     expect(preCompactionModelViews).toEqual([preCompactionView]);
     expect(vi.mocked(compactMessages).mock.calls[0]?.[0]).toEqual(preCompactionView);
-    expect(stepViews).toEqual([compactedHistory]);
+    expect(stepViews).toEqual([preCompactionView]);
   });
 
   it("clears static and dynamic user instructions without rerunning lifecycle events", async () => {
@@ -10236,9 +10231,11 @@ describe("createToolLoopHarness", () => {
     expect(call?.[2]).toEqual(
       expect.objectContaining({
         recentWindowSize: 10,
-        threshold: 100_000,
+        threshold: expect.any(Number),
       }),
     );
+    expect(call?.[2].threshold).toBeLessThan(100_000);
+    expect(call?.[2].threshold).toBeGreaterThan(99_000);
     expect(call?.[3]).toBeUndefined();
   });
 
@@ -10964,7 +10961,7 @@ describe("createToolLoopHarness", () => {
       });
     });
 
-    it("anthropic-direct path: adds prepareStep and marks the last tool", async () => {
+    it("anthropic-direct path: marks the last tool without dropping approval", async () => {
       setupStopResult();
       const config: ToolLoopHarnessConfig = {
         mode: "conversation",
@@ -10977,6 +10974,7 @@ describe("createToolLoopHarness", () => {
           [
             "add",
             {
+              approval: () => "user-approval" as const,
               description: "Adds numbers",
               execute: vi.fn(),
               inputSchema: jsonSchema({ type: "object" }),
@@ -11001,6 +10999,31 @@ describe("createToolLoopHarness", () => {
         anthropic: { cacheControl: { type: "ephemeral" } },
         bedrock: { cachePoint: { type: "default" } },
       });
+
+      const approval = agentCall?.toolApproval;
+      if (typeof approval !== "function") throw new TypeError("Expected tool approval function.");
+      const context = new ContextContainer();
+      context.set(SessionKey, {
+        auth: { current: null, initiator: null },
+        sessionId: "session-1",
+        turn: { id: "turn-1", sequence: 0 },
+      });
+      await expect(
+        contextStorage.run(context, () =>
+          approval({
+            messages: [],
+            runtimeContext: {},
+            toolCall: {
+              input: {},
+              toolCallId: "call-1",
+              toolName: "add",
+              type: "tool-call",
+            },
+            tools: agentCall!.tools,
+            toolsContext: {},
+          }),
+        ),
+      ).resolves.toBe("user-approval");
     });
 
     it("anthropic-direct path: prepareStep marks last user and last assistant messages", async () => {
@@ -11673,9 +11696,9 @@ describe("createToolLoopHarness", () => {
       const attemptCompleted = vi.fn();
       const hooks = createInstrumentationHooks([
         {
-          capture: "content",
           events: { "step.attempt.completed": attemptCompleted },
           name: "analytics",
+          tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
         },
       ]);
       const runStep = createToolLoopHarness(
@@ -11715,7 +11738,12 @@ describe("createToolLoopHarness", () => {
         recordOutputs: true,
         tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
       });
-      const hooks = createInstrumentationHooks([{ capture: "content", name: "analytics" }]);
+      const hooks = createInstrumentationHooks([
+        {
+          name: "analytics",
+          tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
+        },
+      ]);
       const runStep = createToolLoopHarness(
         createTestConfig("conversation", undefined, {
           instrumentation: bindHookInstrumentation(hooks, undefined, true),
@@ -11893,7 +11921,7 @@ describe("createToolLoopHarness", () => {
       }
     });
 
-    it("injects eve.version alongside session context into runtimeContext when telemetry is enabled", async () => {
+    it("injects eve.version alongside session context when runtimeContext is configured", async () => {
       setupMockAgent({
         finishReason: "stop",
         response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -11902,7 +11930,7 @@ describe("createToolLoopHarness", () => {
         toolResults: [],
       });
 
-      declareTelemetry({ tracePolicy: () => true });
+      declareTelemetry({ runtimeContext: () => undefined, tracePolicy: () => true });
       const config = createTestConfig("conversation");
       const runStep = createToolLoopHarness(config);
       await runStep(createTestSession(), { message: "hi" });
@@ -12130,7 +12158,7 @@ describe("createToolLoopHarness", () => {
       });
     });
 
-    it("merges step-started runtime context before emitting step.started", async () => {
+    it("merges runtime context before emitting step.started", async () => {
       setupMockAgent({
         finishReason: "stop",
         response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -12146,26 +12174,22 @@ describe("createToolLoopHarness", () => {
         events.push(event);
       };
       const resolveRuntimeContext = vi.fn((input: InstrumentationStepStartedEventInput) => {
-        order.push('events["step.started"]');
+        order.push("runtimeContext");
         if (input.channel.kind !== "channel:support") {
           throw new Error("expected support channel metadata");
         }
         return {
-          runtimeContext: {
-            "eve.session.id": "user-override",
-            "slack.user_id":
-              typeof input.channel.metadata["triggeringUserId"] === "string"
-                ? input.channel.metadata["triggeringUserId"]
-                : "",
-            "turn.id": input.turn.id,
-          },
+          "eve.session.id": "user-override",
+          "slack.user_id":
+            typeof input.channel.metadata["triggeringUserId"] === "string"
+              ? input.channel.metadata["triggeringUserId"]
+              : "",
+          "turn.id": input.turn.id,
         };
       });
       declareTelemetry(
         {
-          events: {
-            "step.started": resolveRuntimeContext,
-          },
+          runtimeContext: resolveRuntimeContext,
         },
         undefined,
         "public",
@@ -12223,12 +12247,12 @@ describe("createToolLoopHarness", () => {
       expect(agentCall?.telemetry?.includeRuntimeContext).toEqual(
         Object.fromEntries(Object.keys(agentCall?.runtimeContext ?? {}).map((key) => [key, true])),
       );
-      expect(order.indexOf("turn.started")).toBeLessThan(order.indexOf('events["step.started"]'));
-      expect(order.indexOf("step.started")).toBeLessThan(order.indexOf('events["step.started"]'));
+      expect(order.indexOf("turn.started")).toBeLessThan(order.indexOf("runtimeContext"));
+      expect(order.indexOf("step.started")).toBeLessThan(order.indexOf("runtimeContext"));
       expect(getCompatibilityEventTypes(events)).toContain("step.started");
     });
 
-    it("continues the normal turn flow when step-started runtime context throws", async () => {
+    it("continues the normal turn flow when runtime context throws", async () => {
       setupMockAgent({
         finishReason: "stop",
         response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -12238,10 +12262,8 @@ describe("createToolLoopHarness", () => {
       });
 
       declareTelemetry({
-        events: {
-          "step.started": () => {
-            throw new Error("runtime context resolver failed");
-          },
+        runtimeContext: () => {
+          throw new Error("runtime context resolver failed");
         },
       });
 
@@ -12269,16 +12291,12 @@ describe("createToolLoopHarness", () => {
       });
     });
 
-    it("resolves step-started runtime context for each step and turn coordinate", async () => {
+    it("resolves runtime context for each step and turn coordinate", async () => {
       const resolveRuntimeContext = vi.fn((input: InstrumentationStepStartedEventInput) => ({
-        runtimeContext: {
-          "test.step": `${input.turn.id}:${input.step.index}`,
-        },
+        "test.step": `${input.turn.id}:${input.step.index}`,
       }));
       declareTelemetry({
-        events: {
-          "step.started": resolveRuntimeContext,
-        },
+        runtimeContext: resolveRuntimeContext,
       });
 
       const { emit } = createEventCollector();
@@ -12995,6 +13013,8 @@ describe("createToolLoopHarness", () => {
           { content: "Hi", kind: "user" as const, role: "user" },
         ],
         session.compaction,
+        expect.any(Number),
+        undefined,
       );
       expect(vi.mocked(compactMessages).mock.calls[0]?.[0]).toEqual([
         { content: "earlier", kind: "user" as const, role: "user" },

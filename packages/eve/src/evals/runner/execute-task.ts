@@ -1,3 +1,4 @@
+import { runUntilAborted } from "#evals/abort.js";
 import type { Client } from "#client/client.js";
 import type { MessageStreamEvent, RuntimeIdentity } from "#protocol/message.js";
 import { toErrorMessage } from "#shared/errors.js";
@@ -12,7 +13,8 @@ import type {
   EveEvalTurn,
 } from "#evals/types.js";
 import { createEmptyDerivedFacts } from "#evals/runner/derive-run-facts.js";
-import { EvalSessionManager, type EvalSessionStartedEvent } from "#evals/session.js";
+import { EvalSessionManager } from "#evals/session-manager.js";
+import type { EvalSessionStartedEvent } from "#evals/session.js";
 import { createEvalContext } from "#evals/context.js";
 import { scopeEvalTargetHandle } from "#evals/target.js";
 import { AssertionCollector } from "#evals/assertions/collector.js";
@@ -196,22 +198,4 @@ function sum<T>(entries: readonly T[], read: (entry: T) => number): number {
 
 function neverAbortSignal(): AbortSignal {
   return new AbortController().signal;
-}
-
-async function runUntilAborted(task: void | Promise<void>, signal: AbortSignal): Promise<void> {
-  signal.throwIfAborted();
-
-  let onAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-
-  try {
-    await Promise.race([task, aborted]);
-  } finally {
-    if (onAbort !== undefined) {
-      signal.removeEventListener("abort", onAbort);
-    }
-  }
 }

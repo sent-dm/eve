@@ -2,7 +2,7 @@ import type { Experimental_EvaluationModel } from "ai";
 import { defineDynamic } from "eve";
 import { defineState } from "eve/context";
 import { mockModel, type MockModelResponder } from "eve/evals";
-import { autoModel } from "eve/experimental/evaluate";
+import { auto } from "eve/models";
 
 export const routing = defineState("evaluate-fixture.routing", () => ({
   requests: 0,
@@ -10,7 +10,22 @@ export const routing = defineState("evaluate-fixture.routing", () => ({
   reasoning: "unselected",
 }));
 
-const evaluationModel = {
+export const permissionEvaluationModel: Exclude<Experimental_EvaluationModel, string> = {
+  specificationVersion: "v4",
+  provider: "fixture",
+  modelId: "fixture-permission-evaluator",
+  supportedQuestionTypes: ["choice"],
+  async doEvaluate({ state }) {
+    const choice = JSON.stringify(state).includes('"effect":"malicious"') ? "caution" : "clear";
+    return {
+      answers: { permission: { type: "choice", choice } },
+      usage: { inputTokens: 20, outputTokens: 1 },
+      warnings: [],
+    };
+  },
+};
+
+export const evaluationModel: Exclude<Experimental_EvaluationModel, string> = {
   specificationVersion: "v4",
   provider: "fixture",
   modelId: "fixture-evaluator",
@@ -37,11 +52,11 @@ const evaluationModel = {
       response: { modelId: "fixture-evaluator" },
     };
   },
-} satisfies Exclude<Experimental_EvaluationModel, string>;
+};
 
 /** Run the real router with deterministic evaluation and language models. */
 export function fixtureModel(respond: MockModelResponder) {
-  const model = autoModel({
+  const model = auto({
     model: evaluationModel,
     options: {
       "openai/large": {

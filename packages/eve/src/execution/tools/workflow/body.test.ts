@@ -12,12 +12,42 @@ vi.mock("#execution/tools/workflow/ask.js", async (importOriginal) => ({
   ask: mocks.ask,
 }));
 
+it("defaults agent metadata to an empty registry for older workflow payloads", async () => {
+  mocks.execute.mockImplementation(async (_input, ctx: WorkflowToolContext) => {
+    expect(ctx.agents).toEqual({});
+    return null;
+  });
+  await executeWorkflowBody(
+    {
+      callId: "legacy-call",
+      input: {},
+      session: {
+        auth: { current: null, initiator: null },
+        id: "session",
+        turn: { id: "turn", sequence: 1 },
+      },
+      stepIndex: 0,
+      toolName: "legacy",
+      workflowId: "workflow//test//legacy",
+      owner: { inbox: "inbox" },
+      execution: "blocking",
+      runId: "run",
+    },
+    new AbortController().signal,
+  );
+});
+
 it("binds workflow-only methods to the run context", async () => {
   const signal = new AbortController().signal;
   const input = {
+    agents: { reviewer: { description: "Review deployments." } },
     callId: "call",
     input: {},
-    session: { id: "session", turn: { id: "turn", sequence: 1 } },
+    session: {
+      auth: { current: null, initiator: null },
+      id: "session",
+      turn: { id: "turn", sequence: 1 },
+    },
     stepIndex: 0,
     toolName: "deploy",
     workflowId: "workflow//test//execute",
@@ -33,6 +63,9 @@ it("binds workflow-only methods to the run context", async () => {
   mocks.execute.mockImplementation(async (_input, ctx: WorkflowToolContext & ToolContext) => {
     expect(readWorkflowToolRunRef(ctx).runId).toBe("run");
     expect(ctx.abortSignal).toBe(signal);
+    expect(ctx.agents).toEqual({ reviewer: { description: "Review deployments." } });
+    expect(Object.isFrozen(ctx.agents)).toBe(true);
+    expect(Object.isFrozen(ctx.agents.reviewer)).toBe(true);
     const answer = await ctx.ask(question);
     const result = await ctx.agent(target, invocation);
     expect(mocks.ask).toHaveBeenCalledWith(ctx, question);

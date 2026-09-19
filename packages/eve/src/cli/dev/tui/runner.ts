@@ -1,3 +1,4 @@
+import { isJsonObjectValue } from "#shared/json.js";
 import type { ModelAccessChange } from "#shared/model-connection.js";
 import { SteeringStream } from "#cli/dev/tui/steering-stream.js";
 import {
@@ -53,7 +54,6 @@ import {
   localFailureHint,
 } from "./errors.js";
 
-import { pickAgentHeaderTip } from "./agent-header.js";
 import { probeAgentInfo } from "#services/dev-client/agent-info-probe.js";
 import { parseLogDisplayMode } from "./log-display-mode.js";
 import {
@@ -253,8 +253,6 @@ export type AgentTUIAgentHeader = {
   name: string;
   serverUrl: string;
   info?: AgentInfoResult;
-  /** Message-of-the-day line shown below the startup card (local sessions only). */
-  tip?: string;
 };
 
 export type AgentTUIRenderer = {
@@ -428,7 +426,6 @@ export interface PromptCommandHandler {
 }
 
 type TuiStartup = {
-  readonly headerTip: string;
   finish(): { draft: string; queuedPrompt: string | undefined };
 };
 
@@ -567,12 +564,6 @@ export class EveTUIRunner {
    */
   readonly #vercelStatus?: VercelStatusTracker;
   readonly #mcpConnectionStatus?: McpConnectionStatusTracker;
-  /**
-   * The header's message-of-the-day, picked once so dev HMR header
-   * refreshes don't re-roll it mid-session. Local sessions only — every
-   * tip references local-only slash commands.
-   */
-  readonly #headerTip: string;
   #agentInfo?: AgentInfoResult;
   /**
    * approval-id → input-request map populated as `input.requested` events
@@ -633,14 +624,13 @@ export class EveTUIRunner {
     if (this.#client !== undefined) pumpOptions.client = this.#client;
     if (this.#renderer.subagents !== undefined) pumpOptions.view = this.#renderer.subagents;
     if (options.appRoot !== undefined) {
-      pumpOptions.onToolCompleted = async (toolName, output) => {
-        const address = registryHandoffAddress(toolName, output);
+      pumpOptions.onToolCompleted = async (subagentName, toolName, output) => {
+        const address = registryHandoffAddress(subagentName, toolName, output);
         if (address !== undefined) this.#queueRegistrySetup(address);
       };
     }
     this.#subagentPump = new SubagentPump(pumpOptions);
     this.#name = options.name ?? "eve";
-    this.#headerTip = options.startup?.headerTip ?? pickAgentHeaderTip();
     this.#withExclusiveTerminal = options.withExclusiveTerminal;
     this.#tools = options.tools ?? "full";
     this.#reasoning = options.reasoning ?? "full";
@@ -724,7 +714,7 @@ export class EveTUIRunner {
         try {
           const probe = await devBootPhase(
             "connecting to agent",
-            () => probeAgentInfo({ client }),
+            () => probeAgentInfo({ client, timeoutMs: 2000 }),
             this.#onBootProgress,
           );
           if (probe.kind === "ready") info = probe.info;
@@ -756,7 +746,6 @@ export class EveTUIRunner {
       serverUrl,
     };
     if (headerInfo !== undefined) header.info = headerInfo;
-    if (this.#appRoot !== undefined && !this.#onboard) header.tip = this.#headerTip;
     this.#renderer.renderAgentHeader?.(header);
     return headerInfo;
   }
@@ -850,14 +839,9 @@ export class EveTUIRunner {
     this.#replaceAgentInfo(this.#agentInfo);
     this.#paintSetupAttention();
     this.#renderer.setStartupPhase?.(undefined);
-    if (initialAgentOnboarding) {
-      this.#renderStartupCommandInvocation(
-        { type: "extension", name: "login", argument: "" },
-        "startup",
-        startupOutcome?.tone,
-      );
+    if (!initialAgentOnboarding || startupOutcome?.cancelled || startupOutcome?.tone === "error") {
+      this.#renderCommandOutcome(startupOutcome?.message, startupOutcome?.tone);
     }
-    this.#renderCommandOutcome(startupOutcome?.message, startupOutcome?.tone);
 
     while (true) {
       if (this.#lifecycle?.signal.aborted === true || this.#renderer.exitRequested?.() === true) {
@@ -1334,6 +1318,7 @@ export class EveTUIRunner {
     let stopped = false;
     let refreshing = false;
     let inFlightRefresh: Promise<void> | undefined;
+    let agentInfoRefreshPending = false;
     let lastChatGptAuthRefresh = 0;
     const refresh = async () => {
       if (stopped || refreshing) {
@@ -1345,6 +1330,16 @@ export class EveTUIRunner {
         await runtimeArtifacts.refreshIdle({
           onRuntimeArtifactsChanged: () => this.#handleRuntimeArtifactsChanged(),
         });
+        if (
+          this.#appRoot !== undefined &&
+          this.#agentInfo === undefined &&
+          !agentInfoRefreshPending
+        ) {
+          agentInfoRefreshPending = true;
+          void this.#refreshAgentInfo().finally(() => {
+            agentInfoRefreshPending = false;
+          });
+        }
         const endpoint = this.#agentInfo?.agent.model.endpoint;
         const shouldRefreshChatGptAuth =
           endpoint?.kind === "chatgpt" &&
@@ -1800,20 +1795,6 @@ export class EveTUIRunner {
     return await handler.handle(command, context);
   }
 
-  #renderStartupCommandInvocation(
-    command: Extract<PromptCommand, { type: "extension" }>,
-    trigger: "startup" | "command",
-    tone?: "success" | "error",
-  ): void {
-    if (trigger !== "startup") return;
-
-    const state = this.#remoteConnection?.current().connection.state;
-    const status =
-      tone === "error" || state === "auth-failed" || state === "unavailable" ? "failed" : undefined;
-    const argument = command.argument.length === 0 ? "" : ` ${command.argument}`;
-    this.#renderer.renderCommandInvocation?.(`/${command.name}${argument}`, status);
-  }
-
   async #applyCommandEffect(effect: PromptCommandOutcome["effect"]): Promise<void> {
     if (effect?.kind === "model-access-changed") {
       this.#vercelStatus?.applyEffect({ kind: "refresh-identity" });
@@ -2152,14 +2133,16 @@ type EveStreamTranslatorInput = {
   failureHintOverride?: (event: FailureStreamEvent) => string | undefined;
 };
 
-const SELFMOD_REGISTRY_ADD_TOOL = "selfmod__registry_add";
-
-/** Returns the registry address carried by a self-modification terminal handoff. */
+/** Returns the registry address carried by a packaged self-modification terminal handoff. */
 export function registryHandoffAddress(
+  subagentName: string | undefined,
   toolName: string | undefined,
   output: unknown,
 ): string | undefined {
-  if (toolName !== SELFMOD_REGISTRY_ADD_TOOL || typeof output !== "object" || output === null) {
+  const isPackagedChild =
+    subagentName === "self-modification__agent" && toolName === "registry_add";
+  const isLegacyRoot = subagentName === undefined && toolName === "selfmod__registry_add";
+  if ((!isPackagedChild && !isLegacyRoot) || typeof output !== "object" || output === null) {
     return undefined;
   }
   const result = output as { address?: unknown; status?: unknown };
@@ -2446,6 +2429,17 @@ async function* eveEventsToTUIStream(
 
       case "action.result": {
         const resultEvent = event as ActionResultStreamEvent;
+        const result = resultEvent.data.result;
+        const output = "output" in result ? result.output : undefined;
+        if (
+          resultEvent.data.status === "completed" &&
+          isJsonObjectValue(output) &&
+          output.status === "working" &&
+          typeof output.taskId === "string" &&
+          typeof output.agentId === "string"
+        ) {
+          onSubagentBackgrounded?.(result.callId);
+        }
         if (resultEvent.data.result.kind !== "tool-result") {
           break;
         }
@@ -2464,7 +2458,7 @@ async function* eveEventsToTUIStream(
               toolCallId: callId,
               output,
             };
-            const address = registryHandoffAddress(toolNames.get(callId), output);
+            const address = registryHandoffAddress(undefined, toolNames.get(callId), output);
             if (address !== undefined) await onRegistryHandoff?.(address);
             break;
           }

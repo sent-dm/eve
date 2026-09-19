@@ -10,7 +10,10 @@ const { findPackageJSON, readFile } = vi.hoisted(() => ({
   readFile: vi.fn(),
 }));
 
-vi.mock("node:module", () => ({ findPackageJSON }));
+vi.mock("node:module", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:module")>()),
+  findPackageJSON,
+}));
 vi.mock("node:fs/promises", () => ({ readFile }));
 
 import { readTerminalHeadlessEvent, runEveAdd } from "./extension/eve-add.js";
@@ -19,8 +22,8 @@ import {
   handoffMessage,
   resolveRegistryAddTool,
   unsetEnvVars,
-} from "./extension/tools/registry_add.js";
-import { clearRegistryIndexCache } from "./extension/tools/search_registry.js";
+} from "./extension/subagents/agent/tools/registry_add.js";
+import { clearRegistryIndexCache } from "./extension/subagents/agent/tools/search_registry.js";
 
 const APP_ROOT = "/workspace/agent";
 const originalEveDev = process.env.EVE_DEV;

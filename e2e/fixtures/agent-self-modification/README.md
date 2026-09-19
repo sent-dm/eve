@@ -8,7 +8,7 @@ Routing-only cases remain in [`agent-subagents`](../agent-subagents/evals/self-m
 
 ## Fixture preparation
 
-`pnpm run e2e:prepare` copies the `eve/self-modification` scaffold from this checkout using the source and target paths in `apps/docs/registry.json`. The generated `agent/subagents/self-modification/` directory is gitignored and replaced on each preparation; no registry fetch, dependency installation, or credential setup runs.
+`pnpm run e2e:prepare` copies the `eve/self-modification` scaffold from this checkout using the source and target paths in `apps/docs/registry.json`. The generated `agent/extensions/self-modification/` directory is gitignored and replaced on each preparation; no registry fetch, dependency installation, or credential setup runs.
 
 The fixture's `build`, `dev`, `typecheck`, and `test:e2e` scripts prepare the scaffold before starting eve. The local e2e CI workflow also runs `e2e:prepare` before invoking `eve eval` directly. For a direct CLI invocation, prepare first. Do not prepare while an eval or dev server is running: preparation replaces the generated subtree.
 
@@ -16,6 +16,7 @@ This exercises the current standard scaffold without duplicating it in the fixtu
 
 ## Cases
 
+- `create-background-replication-check.eval.ts` creates a ten-second background workflow, calls it on the next turn of the authoring session, and checks its immediate receipt, delayed completion, task identity, typed input, and structured positive result.
 - `create-incident-triage.eval.ts` creates an incident-triage tool and checks precedence and threshold rules across typed inputs.
 - `create-shipping-quote.eval.ts` creates a quote calculator and checks destination, started-kilogram, free-shipping, and expedited pricing boundaries.
 - `offer-repair.eval.ts` reproduces an incorrect reorder recommendation, checks that the parent offers but does not start a repair, confirms it, and verifies the repaired tool.
@@ -36,7 +37,7 @@ The harness snapshots the complete `agent/` tree, tracks sessions, and retires t
 
 Keep `maxConcurrency: 1`. The harness also serializes cleanup that continues after an eval timeout and acquires a checkout lock before snapshotting source. A concurrent `eve eval` process fails before mutation. If cleanup cannot safely restore source, the lock remains with owner diagnostics; remove it only after inspecting the retained backup and confirming no eval or development server is mutating the fixture.
 
-Forced rebuilds isolate source-authoring and runtime correctness. These cases do not verify automatic hot-reload timing or deployed proposal/merge behavior. Real-model e2e runs belong in CI. The fixture-only cleanup tests need no model or running server:
+Forced rebuilds isolate source-authoring and runtime correctness in the other cases. The background replication case instead verifies that automatic rebuilding makes a newly authored capability available on the next turn of the existing session. These cases do not verify deployed proposal/merge behavior. Real-model e2e runs belong in CI. The fixture-only cleanup tests need no model or running server:
 
 ```sh
 pnpm --filter agent-self-modification test:scenario

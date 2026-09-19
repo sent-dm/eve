@@ -5,7 +5,6 @@ import { lineOf } from "./line-editor.js";
 import {
   renderAcknowledgeQuestion,
   renderFlowPanel,
-  renderModelEditorQuestion,
   renderSelectQuestion,
   renderTextQuestion,
 } from "./setup-panel.js";
@@ -67,7 +66,7 @@ describe("renderFlowPanel", () => {
     expect(text).toContain("   › Create a new project");
   });
 
-  it("renders multiline titles as separate terminal rows", () => {
+  it("wraps long titles and renders multiline titles as separate terminal rows", () => {
     const title =
       "You need to link to a project to use linear through Vercel Connect.\n\nSelect your team";
     const rows = renderFlowPanel(
@@ -81,11 +80,12 @@ describe("renderFlowPanel", () => {
         },
       },
       theme,
-      80,
+      48,
     );
 
-    expect(rows.slice(0, 5)).toEqual([
-      "   You need to link to a project to use linear through Vercel Connect.",
+    expect(rows.slice(0, 7)).toEqual([
+      "   You need to link to a project to use linear",
+      "   through Vercel Connect.",
       "",
       "   Select your team",
       "",
@@ -286,6 +286,32 @@ describe("renderSelectQuestion", () => {
     expect(text).toContain("    Link an existing project");
     expect(text).not.toContain("1.");
     expect(text).toContain("esc to cancel");
+  });
+
+  it("wraps a long question instead of clipping it", () => {
+    const options = [
+      { value: "yes", label: "Yes" },
+      { value: "no", label: "No" },
+    ];
+    const rows = renderSelectQuestion(
+      {
+        kind: "single",
+        message:
+          "A legacy self-modification scaffold was found at agent/subagents/self-modification. This scaffold format is no longer supported. Do you want to remove it?",
+        options,
+        select: initialSelectState({ options }),
+      },
+      theme,
+      48,
+    );
+
+    expect(rows.slice(0, 5)).toEqual([
+      "  A legacy self-modification scaffold was",
+      "  found at agent/subagents/self-modification.",
+      "  This scaffold format is no longer supported.",
+      "  Do you want to remove it?",
+      "",
+    ]);
   });
 
   it("drops the numbers for a lone option", () => {
@@ -903,141 +929,6 @@ describe("renderAcknowledgeQuestion", () => {
 
     expect(rows[0]).toBe("  All set");
     expect(rows.filter((row) => row.trim().length > 0)).toHaveLength(2);
-  });
-});
-
-describe("renderModelEditorQuestion", () => {
-  // Editor requests carry id-labeled rows (the flow's modelListRows mapping).
-  const MODEL_IDS = [
-    "anthropic/claude-sonnet-5",
-    "openai/gpt-5.6-sol",
-    "openai/gpt-5.6-terra",
-    "openai/gpt-5.6-luna",
-    "xai/grok-4.5",
-    "google/gemini-3.5",
-    "zai/glm-4.6",
-    "meta/llama-5",
-    "mistral/large-3",
-    "cohere/command-b",
-  ];
-  const MODELS = MODEL_IDS.map((id, index) =>
-    index < 2 ? { value: id, label: id, featured: true } : { value: id, label: id },
-  );
-
-  const CAPS = {
-    reasoning: true,
-    reasoningLevels: ["low", "medium", "high"],
-    fastMode: true,
-  } as const;
-
-  function editorRequest(overrides = {}) {
-    return {
-      model: { kind: "pick", options: MODELS, current: "anthropic/claude-sonnet-5" },
-      reasoning: null,
-      serviceTier: { kind: "standard" },
-      settingsEditable: true,
-      externalRouting: false,
-      capabilitiesFor: () => CAPS,
-      ...overrides,
-    } as never;
-  }
-
-  function editorState(overrides = {}) {
-    return {
-      screen: { kind: "menu", cursor: "model" },
-      draft: { modelId: "anthropic/claude-sonnet-5", reasoning: "medium", tier: "standard" },
-      capabilities: CAPS,
-      ...overrides,
-    } as never;
-  }
-
-  it("summarizes a fast-mode draft and an unset level on the menu hints", () => {
-    const text = renderModelEditorQuestion(
-      {
-        request: editorRequest(),
-        state: editorState({
-          draft: { modelId: "anthropic/claude-sonnet-5", reasoning: "default", tier: "priority" },
-        }),
-      },
-      theme,
-      80,
-    ).join("\n");
-
-    expect(text).toContain("○─○─○ provider default");
-    expect(text).toContain("fast ↯");
-  });
-
-  it("paints the hovered row's covered track stretch blue", () => {
-    const text = renderModelEditorQuestion(
-      {
-        request: editorRequest(),
-        state: editorState({ screen: { kind: "menu", cursor: "reasoning" } }),
-      },
-      colorTheme,
-      80,
-    ).join("\n");
-
-    expect(text).toContain(`${colorTheme.colors.blue("●─◉")}─○`);
-  });
-
-  it("disables the reasoning row with its reason and omits the tier for a no-frills model", () => {
-    const noFrills = { reasoning: false, reasoningLevels: [], fastMode: false };
-    const text = renderModelEditorQuestion(
-      {
-        request: editorRequest(),
-        state: editorState({
-          capabilities: noFrills,
-          draft: { modelId: "test/no-frills", reasoning: "default", tier: "standard" },
-        }),
-      },
-      theme,
-      80,
-    ).join("\n");
-
-    expect(text).toContain("Not supported by the selected model");
-    expect(text).not.toContain("Service tier");
-  });
-
-  it("lists model ids with a bold selection and enter badge", () => {
-    const rows = renderModelEditorQuestion(
-      {
-        request: editorRequest(),
-        state: editorState({
-          screen: {
-            kind: "model",
-            select: initialSelectState({ options: MODELS, defaultValue: "openai/gpt-5.6-sol" }),
-          },
-        }),
-      },
-      theme,
-      80,
-    );
-    const text = rows.join("\n");
-
-    expect(text).toContain("Select the model");
-    expect(text).toContain("   type to search");
-    expect(text).toContain(" › openai/gpt-5.6-sol ");
-    expect(text).toContain("↵");
-    expect(text).toContain("     anthropic/claude-sonnet-5");
-    // Five rows in view, no count row, Esc-only footer.
-    expect(text).toContain("openai/gpt-5.6-luna");
-    expect(text).not.toContain("google/gemini-3.5");
-    expect(text).not.toContain("options, showing");
-    expect(text).toContain("Esc back");
-  });
-
-  it("falls back to ASCII track glyphs without unicode", () => {
-    const ascii = createTheme({ color: false, unicode: false });
-    const text = renderModelEditorQuestion(
-      {
-        request: editorRequest(),
-        state: editorState({ screen: { kind: "menu", cursor: "reasoning" } }),
-      },
-      ascii,
-      80,
-    ).join("\n");
-
-    expect(text).toContain("*-O-. medium");
   });
 });
 

@@ -203,13 +203,11 @@ describe("TerminalRenderer (inline scrollback)", () => {
         connected: true,
         credential: "api-key",
       }),
-      tip: "Use the /deploy command to deploy your agent.",
     });
     renderer.shutdown();
 
     const snapshot = screen.snapshot();
-    expect(snapshot).toMatch(/eve v\d+\.\d+\.\d+.*Weather Agent/u);
-    expect(snapshot).toContain("Use the /deploy command to deploy your agent.");
+    expect(snapshot).toMatch(/☰eve v\d+\.\d+\.\d+ · Weather Agent · Run \/help for commands/u);
     expect(snapshot).not.toContain("http://localhost:3000");
   });
 
@@ -238,7 +236,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     const snapshot = screen.snapshot();
     expect(snapshot).toContain("new-model");
     expect(snapshot).not.toContain("old-model");
-    expect(snapshot.match(/eve v\d/gu)).toHaveLength(1);
+    expect(snapshot.match(/☰eve v\d/gu)).toHaveLength(1);
     expect(snapshot).toContain("hello");
     expect(snapshot).toContain("still here");
     renderer.shutdown();
@@ -614,7 +612,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     );
 
     await Promise.resolve();
-    expect(screen.snapshot()).toContain("W 1s");
+    expect(screen.snapshot()).toContain("Thinking (0s)");
     expect(screen.snapshot()).not.toContain("Ctrl+C to interrupt");
 
     streamController?.close();
@@ -639,7 +637,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
 
     await Promise.resolve();
     // The bar renders; connection state lives in its own section.
-    expect(screen.snapshot()).toContain("W 1s");
+    expect(screen.snapshot()).toContain("Thinking (0s)");
 
     streamController?.close();
     await rendering;
@@ -669,8 +667,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
 
       await Promise.resolve();
       let lines = screen.snapshot().split("\n");
-      // The label types itself out: one character at t=0.
-      let barRow = lines.findIndex((line) => line === "▪ W 1s");
+      let barRow = lines.findIndex((line) => line === "• Thinking (0s)");
       expect(barRow).toBeGreaterThan(-1);
       // The pending prompt row wears the same default-color `❯` as the idle one
       // beneath the bar; the status line follows it.
@@ -678,11 +675,10 @@ describe("TerminalRenderer (inline scrollback)", () => {
       expect(lines[barRow + 2]).toContain("❯");
       expect(lines[barRow + 4]).toContain("gpt-5");
 
-      // The duration ticks live while the pulse blinks on the shared beat.
-      await vi.advanceTimersByTimeAsync(2_000);
+      // Advance past the second boundary so the shared paint ticker catches it.
+      await vi.advanceTimersByTimeAsync(2_100);
       lines = screen.snapshot().split("\n");
-      // Fully revealed once the reveal window has passed.
-      barRow = lines.findIndex((line) => line.includes("Working for 2s"));
+      barRow = lines.findIndex((line) => line.includes("Thinking (2s)"));
       expect(barRow).toBeGreaterThan(-1);
       expect(lines[barRow + 2]).toContain("❯");
       expect(lines[barRow + 4]).toContain("gpt-5");
@@ -710,7 +706,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     input.enter();
 
     expect(await prompt).toBe("hello");
-    expect(screen.snapshot()).toContain("* W 1s");
+    expect(screen.snapshot()).toContain("* Thinking (0s)");
     expect(screen.snapshot()).not.toContain("⊙");
     renderer.shutdown();
   });
@@ -1331,6 +1327,117 @@ describe("TerminalRenderer (inline scrollback)", () => {
     renderer.shutdown();
   });
 
+  it("keeps the activity ticker running while a background subagent remains live", async () => {
+    vi.useFakeTimers();
+    try {
+      const { screen, renderer } = makeRenderer();
+      renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
+      renderer.beginSubagent({ callId: "background", name: "researcher" });
+      renderer.backgroundSubagent({ callId: "background" });
+      renderer.upsertSubagentTool({
+        callId: "background",
+        subagentName: "researcher",
+        childCallId: "child-hold",
+        toolName: "hold",
+        input: { durationMs: 45_000 },
+        status: "executing",
+      });
+
+      await renderer.renderStream(streamOf([{ type: "finish" }]), {
+        continueSession: true,
+        submittedPrompt: "start background work",
+      });
+      const outputBeforeTick = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(90);
+      expect(screen.rawOutput().length).toBeGreaterThan(outputBeforeTick);
+
+      renderer.completeSubagent({ authoritative: true, callId: "background" });
+      const outputAfterCompletion = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(180);
+      expect(screen.rawOutput()).toHaveLength(outputAfterCompletion);
+      renderer.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the ticker running when one of two background subagents completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { screen, renderer } = makeRenderer();
+      renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
+      const startBackground = (callId: string) => {
+        renderer.beginSubagent({ callId, name: "hang-worker" });
+        renderer.backgroundSubagent({ callId });
+        renderer.upsertSubagentTool({
+          callId,
+          subagentName: "hang-worker",
+          childCallId: `${callId}-hold`,
+          toolName: "hold",
+          input: { durationMs: 45_000 },
+          status: "executing",
+        });
+      };
+
+      startBackground("first");
+      await renderer.renderStream(streamOf([{ type: "finish" }]), {
+        continueSession: true,
+        submittedPrompt: "start first background worker",
+      });
+      await renderer.renderStream(
+        streamOf([
+          { type: "assistant-complete", id: "a", text: "Mock reply: a" },
+          { type: "finish" },
+        ]),
+        { continueSession: true, submittedPrompt: "a" },
+      );
+      startBackground("second");
+      await renderer.renderStream(streamOf([{ type: "finish" }]), {
+        continueSession: true,
+        submittedPrompt: "start second background worker",
+      });
+
+      renderer.completeSubagent({ authoritative: true, callId: "first" });
+      const outputBeforeTick = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(90);
+      expect(screen.rawOutput().length).toBeGreaterThan(outputBeforeTick);
+
+      renderer.completeSubagent({ authoritative: true, callId: "second" });
+      const outputAfterCompletion = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(180);
+      expect(screen.rawOutput()).toHaveLength(outputAfterCompletion);
+      renderer.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops background activity ticking when a session boundary abandons its child", async () => {
+    vi.useFakeTimers();
+    try {
+      const { screen, renderer } = makeRenderer();
+      renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
+      renderer.beginSubagent({ callId: "background", name: "researcher" });
+      renderer.backgroundSubagent({ callId: "background" });
+      renderer.upsertSubagentTool({
+        callId: "background",
+        subagentName: "researcher",
+        childCallId: "child-hold",
+        toolName: "hold",
+        input: { durationMs: 45_000 },
+        status: "executing",
+      });
+
+      renderer.renderSessionBoundary();
+      const outputAfterBoundary = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(180);
+      expect(screen.rawOutput()).toHaveLength(outputAfterBoundary);
+      renderer.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("commits completed foreground turns ahead of a live background subagent", async () => {
     const { screen, renderer } = makeRenderer(48, 8);
     renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
@@ -1771,7 +1878,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     expect(screen.snapshot()).toContain("❯ hello");
     expect(screen.snapshot()).not.toContain("Send a message…");
     input.enter();
-    expect(screen.snapshot()).toContain("W 1s");
+    expect(screen.snapshot()).toContain("Thinking (0s)");
     expect(await prompt).toBe("hello");
     renderer.shutdown();
   });
@@ -1786,11 +1893,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
       input.enter();
 
       expect(await prompt).toBe("hello");
-      expect(screen.snapshot()).toContain("▪ W 1s");
-
-      // The typewriter label advances while the submit wait ticks.
-      vi.advanceTimersByTime(450);
-      expect(screen.snapshot()).toContain("Workin");
+      expect(screen.snapshot()).toContain("• Thinking (0s)");
 
       let streamController: ReadableStreamDefaultController<AgentTUIStreamEvent> | undefined;
       const rendering = renderer.renderStream(
@@ -1806,7 +1909,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
       await Promise.resolve();
       // The stream keeps the same bar — one working indicator end to end.
       expect(screen.snapshot()).not.toContain("⊙");
-      expect(screen.snapshot()).toContain(" 1s");
+      expect(screen.snapshot()).toContain("Thinking (0s)");
 
       streamController?.close();
       await rendering;
@@ -1925,7 +2028,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     );
 
     await vi.waitFor(() => {
-      expect(screen.snapshot()).toContain(" 1s");
+      expect(screen.snapshot()).toContain("Thinking (0s)");
     });
     streamController?.enqueue({
       type: "reasoning-delta",
@@ -1935,7 +2038,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     await Promise.resolve();
     // The trace never reaches the screen; the bar carries the turn.
     const lines = screen.snapshot().split("\n");
-    const barRow = lines.findIndex((line) => line.includes(" 1s"));
+    const barRow = lines.findIndex((line) => line.includes("Thinking (0s)"));
     expect(barRow).toBeGreaterThan(-1);
     expect(screen.snapshot()).not.toContain("the plan is to check the forecast");
     // The pending prompt row holds its place below, then the status line.
@@ -2293,7 +2396,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
       { submittedPrompt: "another task", continueSession: true },
     );
     await vi.waitFor(() => {
-      expect(screen.snapshot()).toContain("Working for");
+      expect(screen.snapshot()).toContain("Thinking (");
     });
     input.type("go south");
     input.enter();
@@ -2502,11 +2605,10 @@ describe("TerminalRenderer (inline scrollback)", () => {
 
     startupRenderer.beginStartupDraft({
       initialDraft: "weather",
-      tip: "Use the /help command to see every command.",
       title: "weather-agent",
     });
     expect(screen.snapshot()).toContain("weather-agent");
-    expect(screen.snapshot()).toContain("Use the /help command");
+    expect(screen.snapshot()).toContain("Run /help for commands");
     expect(screen.snapshot()).not.toContain("model");
     expect(screen.snapshot()).not.toContain("loading");
     expect(screen.snapshot()).toContain("Starting agent");
@@ -2543,7 +2645,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     "defers startup warnings until connection readiness at %i columns",
     (columns) => {
       const { renderer, screen } = makeRenderer(columns);
-      renderer.beginStartupDraft({ initialDraft: "Hello Alice", tip: "/help", title: "Agent" });
+      renderer.beginStartupDraft({ initialDraft: "Hello Alice", title: "Agent" });
       renderer.renderSetupWarning("Model disconnected · /login");
       expect(screen.snapshot()).not.toContain("Model disconnected");
       renderer.setStartupPhase("connecting");
@@ -2563,7 +2665,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     "keeps startup editable across connection work and questions at %i columns",
     async (columns) => {
       const { renderer, screen, input } = makeRenderer(columns);
-      renderer.beginStartupDraft({ initialDraft: "Hello", tip: "/help", title: "Agent" });
+      renderer.beginStartupDraft({ initialDraft: "Hello", title: "Agent" });
       const composerRow = screen
         .snapshot()
         .split("\n")
@@ -2619,7 +2721,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
 
   it("restores the startup draft after a masked key question is cancelled", async () => {
     const { renderer, input, screen } = makeRenderer();
-    renderer.beginStartupDraft({ initialDraft: "My message", tip: "/help", title: "Agent" });
+    renderer.beginStartupDraft({ initialDraft: "My message", title: "Agent" });
     renderer.setupFlow.begin("Connect a model", "pulse");
     const answer = renderer.setupFlow.readText({ message: "API key", mask: true });
     input.type("private-test-key");
@@ -2645,7 +2747,6 @@ describe("TerminalRenderer (inline scrollback)", () => {
     });
 
     renderer.beginStartupDraft({
-      tip: "Use the /help command to see every command.",
       title: "weather-agent",
     });
     input.ctrlC();
@@ -2693,7 +2794,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     input.type("no");
     input.enter();
     await answer;
-    expect(screen.snapshot()).toContain("W 1s");
+    expect(screen.snapshot()).toContain("Thinking (0s)");
     renderer.shutdown();
   });
 
@@ -3868,7 +3969,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     });
     input.type("n");
     expect(await approval).toEqual({ approved: false, reason: "Denied by user." });
-    expect(screen.snapshot()).toContain("W 1s");
+    expect(screen.snapshot()).toContain("Thinking (0s)");
     renderer.shutdown();
 
     const snapshot = screen.snapshot();
@@ -3975,7 +4076,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     renderer.renderAgentHeader({ name: "Weather Agent", serverUrl: "http://localhost:3000" });
     renderer.shutdown();
 
-    expect(countOccurrences(screen.snapshot(), "eve v")).toBe(1);
+    expect(countOccurrences(screen.snapshot(), "☰eve v")).toBe(1);
   });
 
   it("reset clears committed transcript rows", () => {
@@ -4376,85 +4477,6 @@ describe("TerminalRenderer setup panel", () => {
     renderer.shutdown();
   });
 
-  it("walks the model editor from pick to slider to toggle to Done", async () => {
-    const { screen, input, renderer } = makeRenderer(100, 40);
-    renderer.setupFlow.begin("Configure the agent model");
-    const answer = renderer.setupFlow.readModelEditor({
-      model: {
-        kind: "pick",
-        options: [
-          {
-            value: "anthropic/claude-sonnet-5",
-            label: "anthropic/claude-sonnet-5",
-            featured: true,
-          },
-          { value: "xai/grok-4.5", label: "xai/grok-4.5" },
-        ],
-        current: "anthropic/claude-sonnet-5",
-      },
-      reasoning: null,
-      serviceTier: { kind: "standard" },
-      settingsEditable: true,
-      externalRouting: false,
-      capabilitiesFor: () => ({
-        reasoning: true,
-        reasoningLevels: ["low", "high"],
-        fastMode: true,
-      }),
-    });
-
-    // The value menu opens on the Model row.
-    expect(screen.snapshot()).toContain("› Model");
-    input.enter();
-    expect(screen.snapshot()).toContain("Select the model");
-    input.type("grok");
-    expect(screen.snapshot()).toContain("xai/grok-4.5");
-    input.enter();
-    await expect(answer).resolves.toEqual({ model: "xai/grok-4.5" });
-    renderer.setupFlow.end({ preserveDiagnostics: false });
-    renderer.shutdown();
-  });
-
-  it("unwinds Esc through filter, sub-screen, and menu before cancelling", async () => {
-    const { screen, input, renderer } = makeRenderer(100, 40);
-    renderer.setupFlow.begin("Configure the agent model");
-    const answer = renderer.setupFlow.readModelEditor({
-      model: {
-        kind: "pick",
-        options: [{ value: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5" }],
-        current: "anthropic/claude-sonnet-5",
-      },
-      reasoning: null,
-      serviceTier: { kind: "standard" },
-      settingsEditable: true,
-      externalRouting: false,
-      capabilitiesFor: () => undefined,
-    });
-    let settled = false;
-    void answer.finally(() => {
-      settled = true;
-    });
-
-    input.enter();
-    input.type("sonnet");
-    input.send("\x1b");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(settled).toBe(false);
-    // The first Esc only cleared the filter; the list is still open.
-    expect(screen.snapshot()).toContain("type to search");
-
-    input.send("\x1b");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(settled).toBe(false);
-    // Back on the menu.
-    expect(screen.snapshot()).toContain("› Model");
-
-    input.send("\x1b");
-    await expect(answer).resolves.toBeUndefined();
-    renderer.setupFlow.end({ preserveDiagnostics: false });
-    renderer.shutdown();
-  });
-
   it("drives the ephemeral flow status through the footer", () => {
     const { screen, renderer } = makeRenderer();
 
@@ -4503,6 +4525,30 @@ describe("TerminalRenderer setup flow session", () => {
     await expect(answer).resolves.toBeUndefined();
     renderer.setupFlow.end({ preserveDiagnostics: false });
     renderer.shutdown();
+  });
+
+  it("does not repaint while inherited stdio owns the terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      const { screen, renderer } = makeRenderer();
+      renderer.setupFlow.begin("Add integration", "pulse");
+      renderer.beginSubagent({ callId: "background", name: "researcher" });
+      renderer.backgroundSubagent({ callId: "background" });
+      let release!: () => void;
+      const inherited = renderer.setupFlow.withInheritedStdio(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+      const outputDuringHandoff = screen.rawOutput().length;
+      await vi.advanceTimersByTimeAsync(180);
+      expect(screen.rawOutput()).toHaveLength(outputDuringHandoff);
+
+      release();
+      await inherited;
+      renderer.setupFlow.end();
+      renderer.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("discards inherited subprocess output when restoring the transcript", async () => {
@@ -5159,14 +5205,14 @@ describe("TerminalRenderer command typeahead", () => {
     const snapshot = screen.snapshot();
     expect(snapshot).toContain("/help");
     expect(snapshot).toContain("Show available commands");
-    expect(snapshot).toContain("Choose a model and its settings");
+    expect(snapshot).toContain("Choose a model, speed, and reasoning");
     const promptLine = snapshot.split("\n").find((line) => line.includes("❯ /"));
     expect(promptLine?.startsWith("❯ /")).toBe(true);
 
     input.enter();
-    // The highlighted default — /help leads the registry — is what a bare
+    // The highlighted default — /model leads the registry — is what a bare
     // slash submits.
-    expect(await prompt).toBe("/help");
+    expect(await prompt).toBe("/model");
     renderer.shutdown();
   });
 
@@ -5181,7 +5227,7 @@ describe("TerminalRenderer command typeahead", () => {
     expect(snapshot).toContain("/model");
     expect(snapshot).toContain("[provider/model]");
     // ...and the dropdown (with its description column) is gone.
-    expect(snapshot).not.toContain("Choose a model and its settings");
+    expect(snapshot).not.toContain("Choose a model, speed, and reasoning");
 
     input.enter();
     expect(await prompt).toBe("/model");
@@ -5238,9 +5284,9 @@ describe("TerminalRenderer command typeahead", () => {
     input.type("/");
     input.down();
     input.enter();
-    // Down moved /help → /info; history recall would have submitted the
+    // Down moved /model → /reset; history recall would have submitted the
     // earlier prompt instead.
-    expect(await second).toBe("/info");
+    expect(await second).toBe("/reset");
     renderer.shutdown();
   });
 
@@ -5258,7 +5304,7 @@ describe("TerminalRenderer command typeahead", () => {
     });
 
     input.type("m");
-    expect(screen.snapshot()).toContain("Choose a model and its settings");
+    expect(screen.snapshot()).toContain("Choose a model, speed, and reasoning");
     input.enter();
     expect(await prompt).toBe("/model");
     renderer.shutdown();
@@ -5294,7 +5340,7 @@ describe("TerminalRenderer command typeahead", () => {
     input.type("/");
     const snapshot = screen.snapshot();
     expect(snapshot).not.toContain("Authenticate with Vercel");
-    expect(snapshot).not.toContain("Choose a model and its settings");
+    expect(snapshot).not.toContain("Choose a model, speed, and reasoning");
     input.enter();
     await prompt;
     renderer.shutdown();

@@ -11,7 +11,7 @@ import {
   validateCompiledModuleMap,
 } from "#compiler/validate-artifact.js";
 
-describe("compiled agent manifest v48", () => {
+describe("compiled agent manifest v50", () => {
   it("round-trips a real compiled graph through the serialized schema", async () => {
     const { manifest } = await compileFromMemory({
       agent: {
@@ -30,6 +30,16 @@ describe("compiled agent manifest v48", () => {
     expect(parsed.config.experimental?.workflow?.retention).toBe(0);
     expect(parsed.config.limits?.maxTokenCostUsdPerSession).toBe(1.5);
     expect(() => validateCompiledAgentManifest(parsed)).not.toThrow();
+  });
+
+  it("round-trips agent tool configuration and disabled tool names", async () => {
+    const { manifest } = await compileFromMemory({
+      agent: { model: "openai/gpt-5.4", tool: false },
+      model: "openai/gpt-5.4",
+    });
+    const parsed = compiledAgentManifestSchema.parse(manifest);
+
+    expect(parsed.config.tool).toBe(false);
   });
 
   it("rejects a missing required binding", async () => {
@@ -110,6 +120,29 @@ describe("compiled agent manifest v48", () => {
         nodes: { ...moduleMap.nodes, __root__: { modules: { ...root.modules, orphan: {} } } },
       }),
     ).toThrow("do not match its bindings");
+  });
+
+  it("rejects a compiled subagent named agent", async () => {
+    const { manifest } = await compileFromMemory({ model: "openai/gpt-5.4" });
+    const subagent = {
+      agent: createCompiledAgentNodeManifest(manifest),
+      backing: { kind: "resource" as const, sourcePath: "/virtual/subagents/agent" },
+      description: "Ambiguous agent.",
+      entryPath: "/virtual/subagents/agent",
+      logicalPath: "subagents/agent",
+      name: "agent",
+      nodeId: "agent-node",
+      owner: { kind: "application" as const },
+      parentNodeId: "__root__",
+      rootPath: "/virtual/subagents/agent",
+      sourceId: "agent-source",
+      sourceKind: "module" as const,
+    };
+    const corrupted = compiledAgentManifestSchema.parse({ ...manifest, subagents: [subagent] });
+
+    expect(() => validateCompiledAgentManifest(corrupted)).toThrow(
+      'subagent name "agent" is reserved for the built-in root-copy target',
+    );
   });
 
   it("rejects a disconnected subagent parent cycle", async () => {

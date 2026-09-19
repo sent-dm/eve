@@ -89,6 +89,7 @@ export async function compileAgentConfig(
     outputSchema?: JsonObject;
     reasoning?: CompiledAgentDefinition["reasoning"];
     source: ModuleSourceRef;
+    tool?: boolean;
     limits?: CompiledAgentDefinition["limits"];
   } = {
     compaction,
@@ -137,6 +138,10 @@ export async function compileAgentConfig(
     compiledConfig.reasoning = definition.reasoning;
   }
 
+  if (definition.tool !== undefined) {
+    compiledConfig.tool = definition.tool;
+  }
+
   if (definition.limits !== undefined) {
     compiledConfig.limits = {
       maxInputTokensPerSession: definition.limits.maxInputTokensPerSession,
@@ -181,10 +186,6 @@ function normalizeExperimentalDefinition(
   }
 
   const compiledExperimental: Mutable<NonNullable<CompiledAgentDefinition["experimental"]>> = {};
-
-  if (experimental.instrumentationProviders !== undefined) {
-    compiledExperimental.instrumentationProviders = experimental.instrumentationProviders;
-  }
 
   if (experimental.workflow !== undefined) {
     compiledExperimental.workflow = {

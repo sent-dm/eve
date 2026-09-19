@@ -16,13 +16,13 @@ export default defineEval({
     const firstTurn = started.message?.includes("SUBAGENT_TOKEN=echo-marker-9F2X")
       ? undefined
       : t.target.watchTurn(started.sessionId, {
-          startIndex: requireStreamIndex(t),
+          startIndex: started.session.state.streamIndex,
         });
     const completed = firstTurn === undefined ? started : await firstTurn.result();
     completed.expectOk();
     completed.messageIncludes("SUBAGENT_TOKEN=echo-marker-9F2X");
 
-    const second = await (firstTurn?.session ?? t).send(
+    const second = await completed.session.send(
       [
         "Use the workflow tool exactly once. In its JavaScript, call the same echo-marker child three times sequentially with ctx.agent",
         "using the agentId shown in the latest <agents> block, with messages 'blocking second', 'blocking third', and 'blocking fourth'.",
@@ -34,7 +34,7 @@ export default defineEval({
 
     t.succeeded();
     t.calledTool("workflow", { count: 2 });
-    t.calledSubagent("echo-marker", { count: 4, status: "pending" });
+    t.calledSubagent("echo-marker", { count: 4, status: "completed" });
     t.eventsSatisfy("all workflow-program calls continue one child session", (events) => {
       const childSessionIds = events.flatMap((event) =>
         event.type === "subagent.called" && event.data.name === "echo-marker"
@@ -51,11 +51,3 @@ export default defineEval({
     t.messageIncludes("WORKFLOW_PROGRAM_SUBAGENT_LIMIT_REACHED");
   },
 });
-
-function requireStreamIndex(session: {
-  readonly state?: { readonly streamIndex?: number };
-}): number {
-  const streamIndex = session.state?.streamIndex;
-  if (streamIndex === undefined) throw new Error("Parent session has no stream index.");
-  return streamIndex;
-}

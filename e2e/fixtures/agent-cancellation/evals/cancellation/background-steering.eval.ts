@@ -1,3 +1,4 @@
+import { taskReceipts } from "@eve-e2e/config/task-receipts";
 import { defineEval, type EveEvalTurn } from "eve/evals";
 import { equals, satisfies } from "eve/evals/expect";
 
@@ -23,11 +24,12 @@ export default cases.map(({ parentActive, steering, description }) =>
     tags: ["real-model", "background-steering"],
     timeoutMs: 240_000,
     async test(t) {
+      const conversation = await t.session();
       const memo = crypto.randomUUID();
       const original = `WORKER-RESULT:ORIGINAL:${memo}`;
       const steered = `WORKER-RESULT:STEERED:${memo}`;
       const expected = steering ? steered : original;
-      let parent = await t.start(
+      let parent = await conversation.start(
         [
           "Call steering-worker exactly once in the background with this exact message:",
           `ASSIGNMENT ${memo}`,
@@ -164,11 +166,7 @@ export default cases.map(({ parentActive, steering, description }) =>
 
         const firstChildTurn = await child.result();
         const receipts = parentTurns.flatMap((turn) =>
-          turn.events.flatMap((event) =>
-            event.type === "subagent.completed" && event.data.backgroundTask !== undefined
-              ? [event.data.backgroundTask.taskId]
-              : [],
-          ),
+          taskReceipts(turn.events).map(({ taskId }) => taskId),
         );
         await t.require(new Set(receipts).size, equals(1));
         if (steering) {

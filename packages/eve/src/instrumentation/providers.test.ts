@@ -131,6 +131,15 @@ describe("registerInstrumentationProvider", () => {
       /The default export of "instrumentation\/otel" is not an instrumentation provider/,
     );
   });
+
+  it("rejects the removed capture option", async () => {
+    const provider = defineInstrumentation({ capture: "metadata" } as never);
+
+    await expect(register("audit", provider)).rejects.toThrow(
+      /instrumentation\/audit.*no longer supports `capture`.*Use `tracePolicy`/u,
+    );
+    expect(getInstrumentationProviders()).toEqual([]);
+  });
 });
 
 describe("seedInstrumentationProviders", () => {
@@ -170,7 +179,7 @@ describe("seedInstrumentationProviders", () => {
 
   it("lets an authored reserved slot reconfigure or disable its default", async () => {
     seedInstrumentationProviders();
-    const authored = localTraces({ exportPolicy: { span: () => false } });
+    const authored = localTraces({ exportPolicy: { span: () => ({ emit: false }) } });
     await register("local", authored);
     expect(getInstrumentationProviders()).toEqual([{ provider: authored, slot: "local" }]);
 
@@ -182,7 +191,7 @@ describe("seedInstrumentationProviders", () => {
     vi.stubEnv(DEVELOPMENT_WORKER_APP_ROOT_ENV, undefined);
     vi.stubEnv("VERCEL_ENV", "production");
     seedInstrumentationProviders();
-    const authored = agentRuns({ exportPolicy: { span: () => false } });
+    const authored = agentRuns({ exportPolicy: { span: () => ({ emit: false }) } });
 
     await register("agent-runs", authored);
 
@@ -194,7 +203,7 @@ describe("seedInstrumentationProviders", () => {
     seedInstrumentationProviders();
     await register("zeta", defineInstrumentation({}));
     await register("audit", defineInstrumentation({}));
-    await register("local", localTraces({ exportPolicy: { span: () => false } }));
+    await register("local", localTraces({ exportPolicy: { span: () => ({ emit: false }) } }));
 
     expect(getInstrumentationProviders().map(({ slot }) => slot)).toEqual([
       "agent-runs",
@@ -228,37 +237,8 @@ describe("finalizeInstrumentationProviders", () => {
     const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
     await runtime.hooks.forTrace!(traceContext("unknown")).publish(turnStarted);
 
-    expect(runtime.instrumentationProviders).toBe(true);
     expect(started).toHaveBeenCalledOnce();
     expect(started.mock.calls[0]?.[0]).toMatchObject({ turnId: "turn-1" });
-  });
-
-  it.each([
-    ["content", true],
-    ["metadata", false],
-  ] as const)(
-    "maps the deprecated %s capture setting to provider policy",
-    async (capture, expected) => {
-      await register("legacy", defineInstrumentation({ capture }));
-
-      const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
-
-      expect(runtime.hooks.forTrace?.(traceContext("private")).capturesContent).toBe(expected);
-    },
-  );
-
-  it("prefers provider tracePolicy over deprecated capture", async () => {
-    await register(
-      "provider",
-      defineInstrumentation({
-        capture: "metadata",
-        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
-      }),
-    );
-
-    const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
-
-    expect(runtime.hooks.forTrace?.(traceContext("private")).capturesContent).toBe(true);
   });
 
   it("still runs execution when no destination was declared", async () => {

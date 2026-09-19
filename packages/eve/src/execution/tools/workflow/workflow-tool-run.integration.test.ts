@@ -19,6 +19,7 @@ import {
   reportingDeployWorkflow,
   stepThenRaceWorkflow,
   stepReferenceWorkflow,
+  workflowContextMisuseWorkflow,
 } from "#internal/testing/workflow-tool-fixtures.js";
 import { waitForHook } from "#internal/testing/workflow-test-helpers.js";
 import { getRun, getWorld, start } from "#internal/workflow/runtime.js";
@@ -487,6 +488,36 @@ describe("workflow tools", () => {
     expect(output).toContain('"callId":"call_deploy_service');
   });
 
+  it("fails workflow-context misuse in a step with actionable guidance", async () => {
+    const runtime = await createWorkflowToolRuntime({
+      agentName: "workflow-step-context-misuse",
+      execute: workflowContextMisuseWorkflow,
+      toolName: "deploy_service",
+    });
+
+    const output = await runtime.run(async () => {
+      const run = await start(workflowEntry, [
+        {
+          kind: "initial",
+          ownerDeploymentId: "dpl_inline",
+          input: { message: 'Run deploy_service with service "api"' },
+          serializedContext: buildSerializedContext({
+            continuationToken: "schedule:workflow-step-context-misuse",
+            mode: "task",
+          }),
+        },
+      ]);
+      const result = await run.returnValue;
+      return String(result.output);
+    });
+
+    expect(output).toContain('ctx.agents is unavailable inside a "use step" function.');
+    expect(output).toContain(
+      "Read ctx.agents in the workflow body and pass the required serializable metadata into the step.",
+    );
+    expect(output).toContain("Attempt 1.");
+  });
+
   it("settles the call with an error when the workflow body throws", async () => {
     const runtime = await createWorkflowToolRuntime({
       agentName: "workflow-tool-fail",
@@ -570,7 +601,7 @@ describe("workflow tools", () => {
             event.data.result.kind === "tool-result" &&
             event.data.result.toolName === "confirm_deploy",
         );
-        expect(progress).toBeGreaterThanOrEqual(0);
+        expect(progress, JSON.stringify(answered)).toBeGreaterThanOrEqual(0);
         expect(resultIndex).toBeGreaterThan(progress);
         const results = filterEventsByType(answered, "action.result");
         expect(results.map((event) => JSON.stringify(event.data.result.output))).toContainEqual(
@@ -714,7 +745,7 @@ describe("workflow tools", () => {
     });
   }, 60_000);
 
-  it("runs a background workflow tool as its task's executor", async () => {
+  it("runs a session-owned background workflow invocation", async () => {
     vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_inline");
     const runtime = await createWorkflowToolRuntime({
       agentName: "workflow-tool-background",
@@ -758,7 +789,7 @@ describe("workflow tools", () => {
           notifications.push(eventsText(filterEventsByType(woken, "message.received")));
         }
         const text = notifications.join("\n");
-        expect(text).toContain("Review plan:api");
+        expect(text).not.toContain("Review plan:api");
         expect(text).not.toContain("update: planned api");
         expect(text).toContain("is completed");
         expect(text).toContain("plan:api");

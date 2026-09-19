@@ -30,22 +30,19 @@ describe("normalizeToolDefinition", () => {
     expect(typeof entry.definition.execute).toBe("function");
   });
 
-  it("preserves the background execution discriminator", () => {
+  it("preserves subagent visibility", () => {
     const tool = defineTool({
-      description: "Starts an export.",
-      execution: "background",
-      inputSchema: z.object({ exportId: z.string() }),
-      async *execute(input) {
-        yield { exportId: input.exportId };
-        return { exportId: input.exportId };
-      },
+      availableInSubagents: false,
+      description: "Runs only in a root session.",
+      inputSchema: z.object({}),
+      execute: () => null,
     });
 
     const entry = normalizeToolDefinition(tool, FAILURE_MESSAGE);
 
     expect(entry.kind).toBe("tool");
     if (entry.kind !== "tool") throw new Error("expected tool kind");
-    expect(entry.definition.execution).toBe("background");
+    expect(entry.definition.availableInSubagents).toBe(false);
   });
 
   it("normalizes a tool with a Zod 3 input schema", () => {

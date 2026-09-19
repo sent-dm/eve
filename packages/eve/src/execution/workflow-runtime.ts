@@ -84,7 +84,6 @@ import { initializeSessionInstrumentation } from "#instrumentation/runtime.js";
 import {
   ACTIVITY_COLLECTOR_WORKFLOW_NAME,
   SESSION_TIMEOUT_WORKFLOW_NAME,
-  TASK_RUN_WORKFLOW_NAME,
   WORKFLOW_TOOL_RUN_WORKFLOW_NAME,
   WORKFLOW_ENTRY_NAME,
 } from "#execution/stable-workflow-names.js";
@@ -117,11 +116,6 @@ export const workflowEntryReference = {
 /** Stable workflow reference for session deadline timers. */
 export const sessionTimeoutWorkflowReference = {
   workflowId: `workflow//${STABLE_ID_BASE}//${SESSION_TIMEOUT_WORKFLOW_NAME}`,
-};
-
-/** Stable workflow reference for durable task runs (`experimental.tasks`). */
-export const taskRunWorkflowReference = {
-  workflowId: `workflow//${STABLE_ID_BASE}//${TASK_RUN_WORKFLOW_NAME}`,
 };
 
 /** Stable workflow reference for root-session activity collectors. */
@@ -397,6 +391,19 @@ async function dispatchWorkflowCommand<TCommand extends SessionCommand>(
     hook = { runId: resumed.ownerRunId, sessionId: await resumed.sessionId };
   } catch (error) {
     if (isInactiveCommandTarget(error)) {
+      if (command.kind === "send" && typeof token !== "string") {
+        try {
+          const status = await getRun(token.sessionId).status;
+          if (status === "pending" || status === "running") {
+            return {
+              status: "session_not_active",
+              retryable: true,
+            } as SessionCommandResult<TCommand>;
+          }
+        } catch (statusError) {
+          if (!isInactiveCommandTarget(statusError)) throw statusError;
+        }
+      }
       return inactiveCommandResult(command);
     }
     logError(log, "failed to dispatch session command", error, {

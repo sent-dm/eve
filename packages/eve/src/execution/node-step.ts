@@ -227,7 +227,6 @@ function resolveHarnessToolDefinition(input: {
         rootOnly: input.tool.rootOnly,
       }),
       nodeId: input.tool.task.nodeId,
-      resultKind: input.tool.task.resultKind,
       workflowId: input.tool.task.workflowId,
     });
   }
@@ -277,6 +276,7 @@ function createRegisteredHarnessToolDefinition(input: {
     def.owner.kind === "framework" && def.name === ASK_QUESTION_TOOL_NAME;
 
   const definition: HarnessToolDefinition = {
+    availableInSubagents: def.availableInSubagents,
     label:
       def.label ??
       (def.owner.kind === "framework" && def.name === WEB_SEARCH_TOOL_NAME
@@ -323,10 +323,6 @@ function resolveAuthoredExecute(input: {
   if (rawExecute === undefined) {
     return undefined;
   }
-  const authored = rawExecute as (
-    toolInput: unknown,
-    ctx: unknown,
-    task?: Parameters<NonNullable<HarnessToolDefinition["execute"]>>[2],
-  ) => unknown;
+  const authored = rawExecute as (toolInput: unknown, ctx: unknown) => unknown;
   return createToolExecuteWithAuth({ execute: authored, scope });
 }

@@ -90,6 +90,8 @@ const targetSlugsByCatalogSlug: Readonly<Record<string, string>> = {
   "chat-sdk-resend": "resend",
 };
 
+const fileValidationExemptCatalogSlugs = new Set(["chat-sdk-gmail"]);
+
 const nonStreamingCatalogSlugs = new Set(["chat-sdk-sendblue"]);
 
 const docsRoot = join(import.meta.dirname, "..");
@@ -159,6 +161,8 @@ for (const [index, item] of items.entries()) {
     }
     continue;
   }
+
+  if (fileValidationExemptCatalogSlugs.has(entry.slug)) continue;
 
   const expectedPath = `registry/channels/${entry.slug}.ts`;
   const expectedTarget = `agent/channels/${targetSlugsByCatalogSlug[entry.slug] ?? entry.slug}.ts`;

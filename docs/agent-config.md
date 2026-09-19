@@ -63,7 +63,7 @@ to compaction calls.
 ### Choose the model dynamically
 
 To select a model from the incoming prompt with an AI SDK evaluation model, use
-[`autoModel` from `eve/experimental/evaluate`](./guides/evaluate).
+[`auto` from `eve/models`](./guides/evaluate).
 
 `model` also accepts `defineDynamic({ events })`. Each matching handler must
 return the concrete model for its scope; a dynamic model has no compiled
@@ -336,6 +336,7 @@ it falls back to the World's default retention period.
 | `experimental` | `AgentExperimentalDefinition`           | unset            | Unstable opt-ins. `workflow.world` selects the Workflow world package on the root agent; `workflow.modelCallsPerStep` batches sequential model calls into a wider replay unit; `workflow.retention` controls how long the durable runtime keeps run data. |
 | `outputSchema` | Standard Schema or a JSON Schema object | none             | Structured return type for function-like invocations such as a subagent turn, schedule, or remote job. Ordinary interactive turns ignore it unless the client supplies a per-message schema.                                                              |
 | `build`        | `{ externalDependencies?: string[] }`   | none             | Hosted-build packaging controls. `externalDependencies` keeps listed packages external while eve compiles authored modules such as tools and channels, and traces those packages into the hosted output.                                                  |
+| `tool`         | `boolean`                               | `true`           | Exposes this agent to its parent model as a tool. On the root agent, controls the built-in `agent` tool. A subagent with `tool: false` remains callable from authored workflow tools through `ctx.agent()`.                                               |
 
 `externalDependencies` is a packaging control only. It keeps selected packages as runtime dependencies in the hosted output; it does not authorize, configure, or review any third-party service those packages may call.
 
@@ -349,7 +350,7 @@ During `eve dev`, ordinary dependencies are bundled into each retained runtime g
 | Per-tool approval (HITL)      | `agent/tools/*.ts`, [Tools](./tools)                                             |
 | Inbound auth & network policy | the channel layer, [Auth & route protection](./guides/auth-and-route-protection) |
 | Sandbox / workspace           | `agent/sandbox/`, [Sandbox](./sandbox)                                           |
-| Telemetry & debugging         | `agent/instrumentation.ts`, [Instrumentation](./observability/instrumentation)   |
+| Telemetry & debugging         | `agent/instrumentation/`, [Instrumentation](./observability/instrumentation)     |
 
 ## What to read next
 

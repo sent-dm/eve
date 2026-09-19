@@ -1,9 +1,13 @@
+enableGlobalVirtualStore: false
+
 packages:
   - "."
 
 minimumReleaseAgeExclude:
-  - eve
+  - "@ai-sdk/*"
   - "@vercel/connect"
+  - ai
+  - eve
 
 allowBuilds:
   "@parcel/watcher": false

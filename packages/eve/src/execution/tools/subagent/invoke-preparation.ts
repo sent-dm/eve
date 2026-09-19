@@ -38,7 +38,7 @@ import {
 import type { SubagentStartTarget } from "#execution/tools/subagent/start.js";
 import type { SubagentInputSource } from "#subagents/tool.js";
 import { createLogger } from "#internal/logging.js";
-import { findSessionTaskEntry } from "#tasks/session-index.js";
+import { findBackgroundWorkflowToolRun } from "#harness/workflow-tool-runs.js";
 
 const log = createLogger("execution.agent-invocation");
 
@@ -67,7 +67,7 @@ export async function prepareOwnerAgentInvocation(input: {
   const task =
     input.taskId === undefined
       ? undefined
-      : findSessionTaskEntry(durableSession.state, input.taskId);
+      : findBackgroundWorkflowToolRun(durableSession.state, input.taskId);
   const action = resolveAgentInvocationAction({
     ctx,
     input: input.invocation,
@@ -78,8 +78,8 @@ export async function prepareOwnerAgentInvocation(input: {
       requests: [action],
       event: {
         ...event,
-        stepIndex: task?.createdByStepIndex ?? event.stepIndex,
-        turnId: task?.createdByTurnId ?? activeTurnId(event),
+        stepIndex: task?.origin.stepIndex ?? event.stepIndex,
+        turnId: task?.origin.turnId ?? activeTurnId(event),
       },
     },
     ctx,

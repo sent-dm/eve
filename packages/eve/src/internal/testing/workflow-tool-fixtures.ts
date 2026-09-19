@@ -13,7 +13,6 @@ import {
 } from "#compiled/@workflow/core/index.js";
 
 import type { WorkflowToolContext } from "#tools/workflow-definition.js";
-import type { TaskExec, TaskMessage } from "#tools/task.js";
 import {
   ConnectionAuthorizationFailedError,
   ConnectionAuthorizationRequiredError,
@@ -39,6 +38,23 @@ export async function authorizedDeployWorkflow(input: DeployInput, ctx: Workflow
   const plan = await planDeployStep(input.service);
   const authenticatedAs = await authorizedDeployStep(input.service, ctx);
   return { plan, authenticatedAs };
+}
+
+export async function workflowContextMisuseWorkflow(_input: DeployInput, ctx: WorkflowToolContext) {
+  "use workflow";
+  return await readAgentsStep(ctx);
+}
+
+async function readAgentsStep(ctx: WorkflowToolContext) {
+  "use step";
+  try {
+    return ctx.agents;
+  } catch (error) {
+    if (error instanceof Error) {
+      error.message += ` Attempt ${getStepMetadata().attempt}.`;
+    }
+    throw error;
+  }
 }
 
 export async function stepReferenceWorkflow(input: DeployInput) {
@@ -166,13 +182,12 @@ export async function* reportingDeployWorkflow(
 export async function* backgroundDeployWorkflow(
   input: DeployInput,
   _ctx: WorkflowToolContext,
-  task: TaskExec,
-): AsyncGenerator<string | TaskMessage, { readonly plan: string }> {
+): AsyncGenerator<string, { readonly plan: string }> {
   "use workflow";
 
   const plan = await planDeployStep(input.service);
   yield `planned ${input.service}`;
-  yield task.postMessage(`Review ${plan}`);
+  yield `review ${plan}`;
   return { plan };
 }
 

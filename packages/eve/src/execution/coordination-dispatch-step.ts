@@ -7,7 +7,6 @@ import {
 } from "#execution/coordination-dispatch-shared.js";
 import { createDurableSessionState } from "#execution/durable-session-store.js";
 import { executeTaskControlAction } from "#execution/tasks/parent/dispatch.js";
-import type { BackgroundTask } from "#execution/tasks/parent/delegate.js";
 import { cancelBackgroundAgentTask } from "#execution/tools/subagent/task-cancel.js";
 import { startWorkflowTask } from "#execution/tools/workflow/start.js";
 import type { RuntimeActionResult } from "#shared/action-types.js";
@@ -29,18 +28,17 @@ export async function dispatchCoordinationStep(
     return {
       results: [],
       sessionState: input.sessionState,
-      pendingTasks: [],
     };
   }
 
   const { batch, session } = prepared;
   let nextSession = session;
   const results: RuntimeActionResult[] = [];
-  const pendingTasks: BackgroundTask[] = [];
 
   for (const entry of prepared.plan) {
     if (entry.kind === "workflow-task") {
       const started = await startWorkflowTask({
+        agents: prepared.workflowAgents,
         auth: prepared.auth,
         batchEvent: batch.event,
         initiatorAuth: prepared.initiatorAuth,
@@ -61,7 +59,6 @@ export async function dispatchCoordinationStep(
         session: nextSession,
       });
       nextSession = control.session;
-      if (control.pendingTask !== undefined) pendingTasks.push(control.pendingTask);
       results.push(control.result);
     }
   }
@@ -72,6 +69,5 @@ export async function dispatchCoordinationStep(
       nextSession === session
         ? prepared.sessionState
         : createDurableSessionState({ session: nextSession }),
-    pendingTasks,
   };
 }
